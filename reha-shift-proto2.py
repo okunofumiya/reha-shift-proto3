@@ -384,8 +384,7 @@ with st.expander("▼ ルール検証モード（上級者向け）"):
 if create_button:
     try:
         # StreamlitのSecretsから認証情報を取得してGoogleに接続
-        creds_string = st.secrets["GSPREAD_CREDENTIALS"]
-        creds_dict = json.loads(creds_string)
+        creds_dict = st.secrets["gcp_service_account"]
         sa = gspread.service_account_from_dict(creds_dict)
         spreadsheet = sa.open("設定ファイル（土井）")
         
