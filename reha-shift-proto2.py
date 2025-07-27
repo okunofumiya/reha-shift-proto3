@@ -386,7 +386,7 @@ if create_button:
         # StreamlitのSecretsから認証情報を取得してGoogleに接続
         creds = st.secrets["GSPREAD_CREDENTIALS"]
         creds_dict = json.loads(creds_string)
-        sa = gspread.service_account_from_dict(creds)
+        sa = gspread.service_account_from_dict(creds_dict)
         spreadsheet = sa.open("設定ファイル（土井）")
         
         # 職員一覧シートをDataFrameとして読み込み
