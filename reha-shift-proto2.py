@@ -6,6 +6,8 @@ import calendar
 import io
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
+import gspread
+from gspread_dataframe import get_as_dataframe
 
 # ★★★ バージョン情報 ★★★
 APP_VERSION = "proto.2.2.3" # ファイルチェック機能強化版
@@ -279,9 +281,6 @@ with st.expander("▼ 各種パラメータを設定する", expanded=True):
         st.subheader("対象年月とファイル")
         year = st.number_input("年（西暦）", min_value=default_year - 5, max_value=default_year + 5, value=default_year)
         month = st.selectbox("月", options=list(range(1, 13)), index=default_month_index)
-        st.markdown("---")
-        staff_file = st.file_uploader("1. 職員一覧 (CSV)", type="csv")
-        requests_file = st.file_uploader("2. 希望休一覧 (CSV)", type="csv")
     with c2:
         st.subheader("日曜日の出勤人数設定")
         c2_1, c2_2, c2_3 = st.columns(3)
@@ -382,69 +381,87 @@ with st.expander("▼ ルール検証モード（上級者向け）"):
         params_ui['s1c_penalty'] = st.number_input("S1-c Penalty", value=60, disabled=not params_ui['s1c_on'], key='s1cp')
 
 if create_button:
-    if staff_file is not None and requests_file is not None:
-        try:
-            params = {}
-            params.update(params_ui)
-            params['staff_df'] = pd.read_csv(staff_file, dtype={'職員番号': str})
-            params['requests_df'] = pd.read_csv(requests_file, dtype={'職員番号': str})
-            params['year'] = year; params['month'] = month
-            params['target_pt'] = target_pt; params['target_ot'] = target_ot; params['target_st'] = target_st
-            params['tolerance'] = tolerance; params['event_units'] = event_units_input
-            
-            # ★★★ 改善点: 必須列の存在チェック ★★★
-            required_staff_cols = ['職員番号', '職種', '1日の単位数']
-            missing_cols = [col for col in required_staff_cols if col not in params['staff_df'].columns]
-            if missing_cols:
-                st.error(f"エラー: 職員一覧CSVの必須列が不足しています。以下の列を追加してください: **{', '.join(missing_cols)}**")
-                st.stop()
-
-            if '職員番号' not in params['requests_df'].columns:
-                 st.error(f"エラー: 希望休一覧CSVに必須列 **'職員番号'** がありません。")
-                 st.stop()
-            
-            if '職員名' not in params['staff_df'].columns:
-                params['staff_df']['職員名'] = params['staff_df']['職種'] + " " + params['staff_df']['職員番号'].astype(str)
-                st.info("職員一覧に「職員名」列がなかったため、仮の職員名を生成しました。")
-            
-            is_feasible, schedule_df, summary_df, message, all_half_day_requests = solve_shift_model(params)
-            
-            st.info(message)
-            if is_feasible:
-                st.header("勤務表")
-                num_days = calendar.monthrange(year, month)[1]
-                
-                summary_T = summary_df.drop(columns=['日', '曜日']).T
-                summary_T.columns = list(range(1, num_days + 1))
-                summary_processed = summary_T.reset_index().rename(columns={'index': '職員名'})
-                summary_processed['職員番号'] = summary_processed['職員名'].apply(lambda x: f"_{x}")
-                summary_processed['職種'] = "サマリー"
-                summary_processed = summary_processed[['職員番号', '職員名', '職種'] + list(range(1, num_days + 1))]
-                
-                final_df_for_display = pd.concat([schedule_df, summary_processed], ignore_index=True)
-                days_header = list(range(1, num_days + 1))
-                weekdays_header = [ ['月','火','水','木','金','土','日'][calendar.weekday(year, month, d)] for d in days_header]
-                final_df_for_display.columns = pd.MultiIndex.from_tuples([('職員情報', '職員番号'), ('職員情報', '職員名'), ('職員情報', '職種')] + list(zip(days_header, weekdays_header)))
-                
-                def style_table(df):
-                    sunday_cols = [col for col in df.columns if col[1] == '日']
-                    styler = df.style.set_properties(**{'text-align': 'center'})
-                    for col in sunday_cols: styler = styler.set_properties(subset=[col], **{'background-color': '#fff0f0'})
-                    return styler
-                
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    schedule_df.to_excel(writer, sheet_name='勤務表', index=False)
-                    summary_df.to_excel(writer, sheet_name='日別サマリー', index=False)
-                excel_data = output.getvalue()
-                st.download_button(label="📥 Excelでダウンロード", data=excel_data, file_name=f"schedule_{year}{month:02d}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-                st.dataframe(style_table(final_df_for_display))
+    try:
+        # StreamlitのSecretsから認証情報を取得してGoogleに接続
+        creds = st.secrets["GSPREAD_CREDENTIALS"]
+        sa = gspread.service_account_from_dict(creds)
+        spreadsheet = sa.open("設定ファイル（土井）")
         
-        except Exception as e:
-            st.error(f'予期せぬエラーが発生しました: {e}')
-            st.exception(e)
-    else:
-        st.warning('職員一覧と希望休一覧の両方のファイルをアップロードしてください。')
+        # 職員一覧シートをDataFrameとして読み込み
+        st.info("🔄 スプレッドシートから職員一覧を読み込んでいます...")
+        staff_worksheet = spreadsheet.worksheet("職員一覧")
+        staff_df = get_as_dataframe(staff_worksheet, dtype={'職員番号': str})
+        staff_df.dropna(how='all', inplace=True) # 空白行を削除
+
+        # 希望休一覧シートをDataFrameとして読み込み
+        st.info("🔄 スプレッドシートから希望休一覧を読み込んでいます...")
+        requests_worksheet = spreadsheet.worksheet("希望休一覧")
+        requests_df = get_as_dataframe(requests_worksheet, dtype={'職員番号': str})
+        requests_df.dropna(how='all', inplace=True) # 空白行を削除
+        st.success("✅ データの読み込みが完了しました。")
+
+        # --- ここから下は、元のコードと同じロジック ---
+        params = {}
+        params.update(params_ui)
+        params['staff_df'] = staff_df
+        params['requests_df'] = requests_df
+        params['year'] = year; params['month'] = month
+        params['target_pt'] = target_pt; params['target_ot'] = target_ot; params['target_st'] = target_st
+        params['tolerance'] = tolerance; params['event_units'] = event_units_input
+        
+        # 必須列の存在チェック
+        required_staff_cols = ['職員番号', '職種', '1日の単位数']
+        missing_cols = [col for col in required_staff_cols if col not in params['staff_df'].columns]
+        if missing_cols:
+            st.error(f"エラー: 職員一覧シートの必須列が不足しています: **{', '.join(missing_cols)}**")
+            st.stop()
+
+        if '職員番号' not in params['requests_df'].columns:
+             st.error(f"エラー: 希望休一覧シートに必須列 **'職員番号'** がありません。")
+             st.stop()
+        
+        if '職員名' not in params['staff_df'].columns:
+            params['staff_df']['職員名'] = params['staff_df']['職種'] + " " + params['staff_df']['職員番号'].astype(str)
+            st.info("職員一覧に「職員名」列がなかったため、仮の職員名を生成しました。")
+        
+        # モデルを解く
+        is_feasible, schedule_df, summary_df, message, all_half_day_requests = solve_shift_model(params)
+        
+        st.info(message)
+        if is_feasible:
+            # (この後の表示ロジックは元のコードのまま)
+            st.header("勤務表")
+            num_days = calendar.monthrange(year, month)[1]
+            
+            summary_T = summary_df.drop(columns=['日', '曜日']).T
+            summary_T.columns = list(range(1, num_days + 1))
+            summary_processed = summary_T.reset_index().rename(columns={'index': '職員名'})
+            summary_processed['職員番号'] = summary_processed['職員名'].apply(lambda x: f"_{x}")
+            summary_processed['職種'] = "サマリー"
+            summary_processed = summary_processed[['職員番号', '職員名', '職種'] + list(range(1, num_days + 1))]
+            
+            final_df_for_display = pd.concat([schedule_df, summary_processed], ignore_index=True)
+            days_header = list(range(1, num_days + 1))
+            weekdays_header = [ ['月','火','水','木','金','土','日'][calendar.weekday(year, month, d)] for d in days_header]
+            final_df_for_display.columns = pd.MultiIndex.from_tuples([('職員情報', '職員番号'), ('職員情報', '職員名'), ('職員情報', '職種')] + list(zip(days_header, weekdays_header)))
+            
+            def style_table(df):
+                sunday_cols = [col for col in df.columns if col[1] == '日']
+                styler = df.style.set_properties(**{'text-align': 'center'})
+                for col in sunday_cols: styler = styler.set_properties(subset=[col], **{'background-color': '#fff0f0'})
+                return styler
+            
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                schedule_df.to_excel(writer, sheet_name='勤務表', index=False)
+                summary_df.to_excel(writer, sheet_name='日別サマリー', index=False)
+            excel_data = output.getvalue()
+            st.download_button(label="📥 Excelでダウンロード", data=excel_data, file_name=f"schedule_{year}{month:02d}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            st.dataframe(style_table(final_df_for_display))
+            
+    except Exception as e:
+        st.error(f'予期せぬエラーが発生しました: {e}')
+        st.exception(e)
 
 st.markdown("---")
 st.markdown(f"<div style='text-align: right; color: grey;'>{APP_CREDIT} | Version: {APP_VERSION}</div>", unsafe_allow_html=True)
