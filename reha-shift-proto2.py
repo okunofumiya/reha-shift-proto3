@@ -8,6 +8,7 @@ from datetime import datetime
 from dateutil.relativedelta import relativedelta
 import gspread
 from gspread_dataframe import get_as_dataframe
+import json
 
 # ★★★ バージョン情報 ★★★
 APP_VERSION = "proto.2.2.3" # ファイルチェック機能強化版
@@ -384,6 +385,7 @@ if create_button:
     try:
         # StreamlitのSecretsから認証情報を取得してGoogleに接続
         creds = st.secrets["GSPREAD_CREDENTIALS"]
+        creds_dict = json.loads(creds_string)
         sa = gspread.service_account_from_dict(creds)
         spreadsheet = sa.open("設定ファイル（土井）")
         
