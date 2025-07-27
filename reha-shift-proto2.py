@@ -77,7 +77,17 @@ def _create_schedule_df(shifts_values, staff, days, staff_df, requests_map):
 # --- メインのソルバー関数 ---
 def solve_shift_model(params):
     year, month = params['year'], params['month']
-    num_days = calendar.monthrange(year, month)[1]; days = list(range(1, num_days + 1)); staff = params['staff_df']['職員番号'].tolist()
+    num_days = calendar.monthrange(year, month)[1]; days = list(range(1, num_days + 1))
+    
+    ### 変更点 1: 日曜上限の必須チェック ###
+    if '日曜上限' not in params['staff_df'].columns:
+        st.error("エラー: 職員一覧に必須列 '日曜上限' がありません。")
+        return False, pd.DataFrame(), pd.DataFrame(), "エラー: 職員一覧に必須列 '日曜上限' がありません。", None
+    if params['staff_df']['日曜上限'].isnull().any():
+        st.error("エラー: 職員一覧の '日曜上限' に空欄があります。全員分入力してください。")
+        return False, pd.DataFrame(), pd.DataFrame(), "エラー: 職員一覧の '日曜上限' に空欄があります。", None
+
+    staff = params['staff_df']['職員番号'].tolist()
     staff_info = params['staff_df'].set_index('職員番号').to_dict('index')
     params['staff_info'] = staff_info 
     params['staff'] = staff 
@@ -90,7 +100,8 @@ def solve_shift_model(params):
     
     kaifukuki_staff = [s for s in staff if staff_info[s].get('役割1') == '回復期専従']; kaifukuki_pt = [s for s in kaifukuki_staff if staff_info[s]['職種'] == '理学療法士']
     kaifukuki_ot = [s for s in kaifukuki_staff if staff_info[s]['職種'] == '作業療法士']; gairai_staff = [s for s in staff if staff_info[s].get('役割1') == '外来PT']
-    chiiki_staff = [s for s in staff if staff_info[s].get('役割1') == '地域包括専従']; sunday_off_staff = gairai_staff + chiiki_staff
+    chiiki_staff = [s for s in staff if staff_info[s].get('役割1') == '地域包括専従']
+    # sunday_off_staffは使わなくなるので削除
     params['kaifukuki_pt'] = kaifukuki_pt; params['kaifukuki_ot'] = kaifukuki_ot; params['gairai_staff'] = gairai_staff 
     job_types = {'PT': pt_staff, 'OT': ot_staff, 'ST': st_staff}
     params['job_types'] = job_types 
@@ -100,10 +111,19 @@ def solve_shift_model(params):
     for index, row in params['requests_df'].iterrows():
         staff_id = row['職員番号']
         if staff_id not in staff: continue
+        # YYYY-MM-DD形式の日付文字列を作成して希望休を読み込む場合
+        # from datetime import date
+        # for d in days:
+        #     col_name = date(year, month, d).strftime('%Y-%m-%d')
+        #     if col_name in row and pd.notna(row[col_name]):
+        #         requests_map[staff_id][d] = row[col_name]
+        #
+        # 現在の「1,2,3...」の列名で読み込む場合
         for d in days:
-            col_name = str(d)
-            if col_name in row and pd.notna(row[col_name]) and row[col_name] in request_types:
-                requests_map[staff_id][d] = row[col_name]
+             col_name = str(d)
+             if col_name in row and pd.notna(row[col_name]):
+                 requests_map[staff_id][d] = row[col_name]
+
     params['requests_map'] = requests_map
 
     model = cp_model.CpModel(); shifts = {}
@@ -111,35 +131,64 @@ def solve_shift_model(params):
         for d in days: shifts[(s, d)] = model.NewBoolVar(f'shift_{s}_{d}')
 
     if params['h1_on']:
+        # (h1のコードは変更なし)
         for s in staff:
             s_reqs = requests_map.get(s, {})
             num_paid_leave = sum(1 for r in s_reqs.values() if r == '有')
             num_special_leave = sum(1 for r in s_reqs.values() if r == '特')
             num_summer_leave = sum(1 for r in s_reqs.values() if r == '夏')
             num_half_kokyu = sum(1 for r in s_reqs.values() if r in ['AM休', 'PM休'])
-            
             full_holidays_total = sum(1 - shifts[(s, d)] for d in days)
-            
             full_holidays_kokyu = model.NewIntVar(0, num_days, f'full_kokyu_{s}')
             model.Add(full_holidays_kokyu == full_holidays_total - num_paid_leave - num_special_leave - num_summer_leave)
-            
             model.Add(2 * full_holidays_kokyu + num_half_kokyu == 18)
 
     if params['h2_on']:
+        # (h2のコードは変更なし)
         for s, reqs in requests_map.items():
             for d, req_type in reqs.items():
                 if req_type in ['×', '有', '特', '夏']: model.Add(shifts[(s, d)] == 0)
                 elif req_type in ['○', 'AM有', 'PM有', 'AM休', 'PM休']: model.Add(shifts[(s, d)] == 1)
 
     if params['h3_on']:
+        # (h3のコードは変更なし)
         for d in days: model.Add(sum(shifts[(s, d)] for s in managers) >= 1)
-    if params['h4_on']:
-        for s in sunday_off_staff:
-            for d in sundays: model.Add(shifts[(s, d)] == 0)
-    if params['h5_on']:
-        for s in staff: model.Add(sum(shifts[(s, d)] for d in sundays) <= 2)
     
+    ### 変更点 2: 古いH4とH5のルールを無効化 ###
+    # H4はUIから削除しても良いが、ここではオフの場合の動作を記述
+    if params.get('h4_on', False):
+        st.warning("H4は廃止されました。職員一覧の「日曜上限」に0を入力してください。")
+        # 何もしない
+
+    # H5もUIから削除しても良い
+    if params.get('h5_on', False):
+        st.warning("H5は廃止されました。「日曜上限」ルールに統合されています。")
+        # 何もしない
+
+    ### 変更点 3: 新しい日曜上限のハード制約 ###
+    for s in staff:
+        # 各職員の日曜出勤回数が、職員情報にある「日曜上限」を超えないようにする
+        sunday_limit = int(staff_info[s]['日曜上限'])
+        model.Add(sum(shifts[(s, d)] for d in sundays) <= sunday_limit)
+
     penalties = []
+    
+    ### 変更点 4: 2段階割り当てのための新しいソフト制約 ###
+    # このペナルティの値は、他のペナルティより十分大きいが、必須ではない程度の値に設定
+    sunday_overwork_penalty = 50 
+    for s in staff:
+        # 日曜上限が3以上の職員に対してのみ、ペナルティを考慮する
+        if int(staff_info[s]['日曜上限']) >= 3:
+            num_sundays_worked = sum(shifts[(s, d)] for d in sundays)
+            # 2回を超えた出勤回数を計算するための変数
+            over_two_sundays = model.NewIntVar(0, 5, f'sunday_over2_{s}')
+            # (実働日曜数 - 2) が 0 より大きい場合、その差分がover_two_sundaysになる
+            # 例: 実働3回なら over_two_sundays = 1
+            model.Add(over_two_sundays >= num_sundays_worked - 2)
+            model.Add(over_two_sundays >= 0)
+            
+            # 2回を超えた出勤回数に対してペナルティを課す
+            penalties.append(sunday_overwork_penalty * over_two_sundays)
     
     if params['s4_on']:
         for s, reqs in requests_map.items():
