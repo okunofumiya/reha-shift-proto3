@@ -156,7 +156,7 @@ def solve_shift_model(year, month, staff_df, requests_df, params):
     full_time_staff = [s for s in all_staff if s not in part_time_staff]
 
     holidays_jp_dates = jpholiday.month_holidays(year, month)
-    holidays_jp = [d.day for d in holidays_jp_dates]
+    holidays_jp = [d[0].day for d in holidays_jp_dates]
     sundays = [d for d in days if calendar.weekday(year, month, d) == 6 and d not in holidays_jp]
     saturdays = [d for d in days if calendar.weekday(year, month, d) == 5 and d not in holidays_jp and d not in sundays]
     special_days = {'sun': sundays, 'sat': saturdays, 'hol': holidays_jp}
