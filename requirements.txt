@@ -6,3 +6,4 @@ python-dateutil
 openpyxl
 gspread
 gspread-dataframe
+jpholiday
