@@ -113,6 +113,10 @@ def solve_shift_model(params):
     params['staff_info'] = staff_info 
     params['staff'] = staff 
 
+    # Identify part-time staff
+    part_time_staff_ids = [s for s in staff if staff_info[s].get('勤務形態') == 'パート']
+    params['part_time_staff_ids'] = part_time_staff_ids 
+
     # 日付の分類 (土曜日が特別日かどうかを考慮)
     sundays = [d for d in days if calendar.weekday(year, month, d) == 6]
     saturdays = [d for d in days if calendar.weekday(year, month, d) == 5]
@@ -164,6 +168,7 @@ def solve_shift_model(params):
     if params['h1_on']:
         # H1: 月間休日数 (ソフト制約化)
         for s_idx, s in enumerate(staff):
+            if s in params['part_time_staff_ids']: continue # パート職員は対象外
             s_reqs = requests_map.get(s, {})
             num_paid_leave = sum(1 for r in s_reqs.values() if r == '有')
             num_special_leave = sum(1 for r in s_reqs.values() if r == '特')
@@ -191,12 +196,22 @@ def solve_shift_model(params):
         # H2: 希望休/有休 (ソフト制約化)
         for s, reqs in requests_map.items():
             for d, req_type in reqs.items():
-                if req_type in ['×', '有', '特', '夏']:
-                    # 休み希望日に出勤(shifts=1)した場合にペナルティ
-                    penalties.append(params['h2_penalty'] * shifts[(s, d)])
-                elif req_type in ['○', 'AM有', 'PM有', 'AM休', 'PM休']:
-                    # 出勤希望日に欠勤(shifts=0)した場合にペnalty
-                    penalties.append(params['h2_penalty'] * (1 - shifts[(s, d)]))
+                if s in params['part_time_staff_ids']:
+                    # パート職員の場合
+                    if req_type == '×' or req_type == '有':
+                        # '×' または '有' の場合は強制的に休み (ハード制約)
+                        model.Add(shifts[(s, d)] == 0)
+                    else:
+                        # '×' 以外の場合は強制的に出勤 (ハード制約)
+                        model.Add(shifts[(s, d)] == 1)
+                else:
+                    # 通常職員の場合
+                    if req_type in ['×', '有', '特', '夏']:
+                        # 休み希望日に出勤(shifts=1)した場合にペナルティ
+                        penalties.append(params['h2_penalty'] * shifts[(s, d)])
+                    elif req_type in ['○', 'AM有', 'PM有', 'AM休', 'PM休']:
+                        # 出勤希望日に欠勤(shifts=0)した場合にペナルティ
+                        penalties.append(params['h2_penalty'] * (1 - shifts[(s, d)]))
 
     if params['h3_on']:
         # H3: 役職者配置 (ソフト制約化)
@@ -210,6 +225,7 @@ def solve_shift_model(params):
     if params.get('h5_on', False):
         # H5: 日曜出勤上限 (ソフト制約)
         for s in staff:
+            if s in params['part_time_staff_ids']: continue # パート職員は対象外
             # 日曜上限が設定されている場合のみ制約を適用
             if pd.notna(staff_info[s].get('日曜上限')):
                 sunday_limit = int(staff_info[s]['日曜上限'])
@@ -226,6 +242,7 @@ def solve_shift_model(params):
     ### 変更点 3: 新しい日曜上限の制約 (ソフト制約化) ###
     # 土日上限、日曜上限、土曜上限のルールを適用
     for s in staff:
+        if s in params['part_time_staff_ids']: continue # パート職員は対象外
         # スプレッドシートの値を取得。空欄の場合はNoneになるように調整。
         sun_sat_limit = pd.to_numeric(staff_info[s].get('土日上限'), errors='coerce')
         sun_limit = pd.to_numeric(staff_info[s].get('日曜上限'), errors='coerce')
@@ -258,6 +275,7 @@ def solve_shift_model(params):
     # このペナルティの値は、他のペナルティより十分大きいが、必須ではない程度の値に設定
     sunday_overwork_penalty = 50 
     for s in staff:
+        if s in params['part_time_staff_ids']: continue # パート職員は対象外
         # 日曜上限が設定されており、かつ3以上の職員に対してのみ、ペナルティを考慮する
         if pd.notna(staff_info[s].get('日曜上限')) and int(staff_info[s]['日曜上限']) >= 3:
             num_sundays_worked = sum(shifts[(s, d)] for d in sundays)
@@ -285,6 +303,7 @@ def solve_shift_model(params):
         params['weeks_in_month'] = weeks_in_month
         
         for s_idx, s in enumerate(staff):
+            if s in params['part_time_staff_ids']: continue # パート職員は対象外
             s_reqs = requests_map.get(s, {})
             all_full_requests = {d for d, r in s_reqs.items() if r in ['×', '有', '特', '夏', '△']}
             all_half_day_requests = {d for d, r in s_reqs.items() if r in ['AM有', 'PM有', 'AM休', 'PM休']}
@@ -609,7 +628,7 @@ if create_button:
         }
         
         # 必須列の存在チェック
-        required_staff_cols = ['職員番号', '職種', '1日の単位数']
+        required_staff_cols = ['職員番号', '職種', '1日の単位数', '勤務形態']
         missing_cols = [col for col in required_staff_cols if col not in params['staff_df'].columns]
         if missing_cols:
             st.error(f"エラー: 職員一覧シートの必須列が不足しています: **{', '.join(missing_cols)}**")
