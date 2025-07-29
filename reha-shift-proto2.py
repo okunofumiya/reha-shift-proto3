@@ -45,7 +45,15 @@ def _create_summary(schedule_df, staff_info_dict, year, month, event_units, all_
             day_info['PT単位数'] = '-'; day_info['OT単位数'] = '-'; day_info['ST単位数'] = '-';
             day_info['PT+OT単位数'] = '-'; day_info['特別業務単位数'] = '-'
         daily_summary.append(day_info)
-    return pd.DataFrame(daily_summary)
+    
+    summary_df = pd.DataFrame(daily_summary)
+    # 数値列を特定
+    numeric_cols = summary_df.select_dtypes(include=np.number).columns
+    # 不要な小数を丸めて、整数にできるものは整数にする
+    for col in numeric_cols:
+        summary_df[col] = summary_df[col].apply(lambda x: f'{int(x) if x == int(x) else x:.1f}'.rstrip('0').rstrip('.') if isinstance(x, (int, float)) else x)
+
+    return summary_df
 
 def _create_schedule_df(shifts_values, staff, days, staff_df, requests_map):
     schedule_data = {}
