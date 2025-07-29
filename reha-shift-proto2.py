@@ -106,13 +106,7 @@ def solve_shift_model(params):
     year, month = params['year'], params['month']
     num_days = calendar.monthrange(year, month)[1]; days = list(range(1, num_days + 1))
     
-    ### 変更点 1: 日曜上限の必須チェック ###
-    if '日曜上限' not in params['staff_df'].columns:
-        st.error("エラー: 職員一覧に必須列 '日曜上限' がありません。")
-        return False, pd.DataFrame(), pd.DataFrame(), "エラー: 職員一覧に必須列 '日曜上限' がありません。", None
-    if params['staff_df']['日曜上限'].isnull().any():
-        st.error("エラー: 職員一覧の '日曜上限' に空欄があります。全員分入力してください。")
-        return False, pd.DataFrame(), pd.DataFrame(), "エラー: 職員一覧の '日曜上限' に空欄があります。", None
+    
 
     staff = params['staff_df']['職員番号'].tolist()
     staff_info = params['staff_df'].set_index('職員番号').to_dict('index')
@@ -217,16 +211,18 @@ def solve_shift_model(params):
     if params.get('h5_on', False):
         # H5: 日曜出勤上限 (ソフト制約)
         for s in staff:
-            sunday_limit = int(staff_info[s]['日曜上限'])
-            num_sundays_worked = sum(shifts[(s, d)] for d in sundays)
-            
-            # 上限を超えた出勤回数を計算
-            over_limit = model.NewIntVar(0, len(sundays), f'sunday_over_{s}')
-            model.Add(over_limit >= num_sundays_worked - sunday_limit)
-            model.Add(over_limit >= 0)
-            
-            # 上限を超えた回数に対してペナルティを課す
-            penalties.append(h_penalty * over_limit)
+            # 日曜上限が設定されている場合のみ制約を適用
+            if pd.notna(staff_info[s].get('日曜上限')):
+                sunday_limit = int(staff_info[s]['日曜上限'])
+                num_sundays_worked = sum(shifts[(s, d)] for d in sundays)
+                
+                # 上限を超えた出勤回数を計算
+                over_limit = model.NewIntVar(0, len(sundays), f'sunday_over_{s}')
+                model.Add(over_limit >= num_sundays_worked - sunday_limit)
+                model.Add(over_limit >= 0)
+                
+                # 上限を超えた回数に対してペナルティを課す
+                penalties.append(h_penalty * over_limit)
 
     ### 変更点 3: 新しい日曜上限の制約 (ソフト制約化) ###
     # 土日上限、日曜上限、土曜上限のルールを適用
@@ -263,8 +259,8 @@ def solve_shift_model(params):
     # このペナルティの値は、他のペナルティより十分大きいが、必須ではない程度の値に設定
     sunday_overwork_penalty = 50 
     for s in staff:
-        # 日曜上限が3以上の職員に対してのみ、ペナルティを考慮する
-        if int(staff_info[s]['日曜上限']) >= 3:
+        # 日曜上限が設定されており、かつ3以上の職員に対してのみ、ペナルティを考慮する
+        if pd.notna(staff_info[s].get('日曜上限')) and int(staff_info[s]['日曜上限']) >= 3:
             num_sundays_worked = sum(shifts[(s, d)] for d in sundays)
             # 2回を超えた出勤回数を計算するための変数
             over_two_sundays = model.NewIntVar(0, 5, f'sunday_over2_{s}')
