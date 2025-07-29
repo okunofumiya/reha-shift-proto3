@@ -160,7 +160,6 @@ def solve_shift_model(params):
         for d in days: shifts[(s, d)] = model.NewBoolVar(f'shift_{s}_{d}')
 
     penalties = []
-    h_penalty = 1000 # ハード制約違反のペナルティ
 
     if params['h1_on']:
         # H1: 月間休日数 (ソフト制約化)
@@ -186,7 +185,7 @@ def solve_shift_model(params):
             # 差分の絶対値を取り、ペナルティとして加算
             abs_deviation = model.NewIntVar(0, num_days * 2, f'h1_abs_dev_{s}')
             model.AddAbsEquality(abs_deviation, deviation)
-            penalties.append(h_penalty * abs_deviation)
+            penalties.append(params['h1_penalty'] * abs_deviation)
 
     if params['h2_on']:
         # H2: 希望休/有休 (ソフト制約化)
@@ -194,10 +193,10 @@ def solve_shift_model(params):
             for d, req_type in reqs.items():
                 if req_type in ['×', '有', '特', '夏']:
                     # 休み希望日に出勤(shifts=1)した場合にペナルティ
-                    penalties.append(h_penalty * shifts[(s, d)])
+                    penalties.append(params['h2_penalty'] * shifts[(s, d)])
                 elif req_type in ['○', 'AM有', 'PM有', 'AM休', 'PM休']:
-                    # 出勤希望日に欠勤(shifts=0)した場合にペナルティ
-                    penalties.append(h_penalty * (1 - shifts[(s, d)]))
+                    # 出勤希望日に欠勤(shifts=0)した場合にペnalty
+                    penalties.append(params['h2_penalty'] * (1 - shifts[(s, d)]))
 
     if params['h3_on']:
         # H3: 役職者配置 (ソフト制約化)
@@ -206,7 +205,7 @@ def solve_shift_model(params):
             no_manager = model.NewBoolVar(f'no_manager_{d}')
             model.Add(sum(shifts[(s, d)] for s in managers) == 0).OnlyEnforceIf(no_manager)
             model.Add(sum(shifts[(s, d)] for s in managers) > 0).OnlyEnforceIf(no_manager.Not())
-            penalties.append(h_penalty * no_manager)
+            penalties.append(params['h3_penalty'] * no_manager)
     
     if params.get('h5_on', False):
         # H5: 日曜出勤上限 (ソフト制約)
@@ -222,7 +221,7 @@ def solve_shift_model(params):
                 model.Add(over_limit >= 0)
                 
                 # 上限を超えた回数に対してペナルティを課す
-                penalties.append(h_penalty * over_limit)
+                penalties.append(params['h5_penalty'] * over_limit)
 
     ### 変更点 3: 新しい日曜上限の制約 (ソフト制約化) ###
     # 土日上限、日曜上限、土曜上限のルールを適用
@@ -238,7 +237,7 @@ def solve_shift_model(params):
             over_limit = model.NewIntVar(0, len(sundays) + len(special_saturdays), f'sun_sat_over_{s}')
             model.Add(over_limit >= num_sun_sat_worked - int(sun_sat_limit))
             model.Add(over_limit >= 0)
-            penalties.append(h_penalty * over_limit)
+            penalties.append(params['h_weekend_limit_penalty'] * over_limit)
         # 土日上限がなく、日曜または土曜上限が設定されている場合
         else:
             if pd.notna(sun_limit):
@@ -246,14 +245,14 @@ def solve_shift_model(params):
                 over_limit = model.NewIntVar(0, len(sundays), f'sunday_over_{s}')
                 model.Add(over_limit >= num_sundays_worked - int(sun_limit))
                 model.Add(over_limit >= 0)
-                penalties.append(h_penalty * over_limit)
+                penalties.append(params['h_weekend_limit_penalty'] * over_limit)
             
             if pd.notna(sat_limit) and special_saturdays:
                 num_saturdays_worked = sum(shifts[(s, d)] for d in special_saturdays)
                 over_limit = model.NewIntVar(0, len(special_saturdays), f'saturday_over_{s}')
                 model.Add(over_limit >= num_saturdays_worked - int(sat_limit))
                 model.Add(over_limit >= 0)
-                penalties.append(h_penalty * over_limit)
+                penalties.append(params['h_weekend_limit_penalty'] * over_limit)
 
     ### 変更点 4: 2段階割り当てのための新しいソフト制約 ###
     # このペナルティの値は、他のペナルティより十分大きいが、必須ではない程度の値に設定
@@ -510,13 +509,25 @@ with st.expander("▼ ルール検証モード（上級者向け）"):
     st.warning("注意: 各ルールのON/OFFやペナルティ値を変更することで、意図しない結果や、解が見つからない状況が発生する可能性があります。")
     st.markdown("---")
     st.subheader("基本ルール（違反時にペナルティが発生）")
-    st.info("これらのルールは通常ONですが、どうしても解が見つからない場合にOFFにできます。違反時のペナルティは一律1000です。")
+    st.info("これらのルールは通常ONですが、どうしても解が見つからない場合にOFFにできます。")
     h_cols = st.columns(4)
     params_ui = {}
-    with h_cols[0]: params_ui['h1_on'] = st.toggle('H1: 月間休日数', value=True, key='h1')
-    with h_cols[1]: params_ui['h2_on'] = st.toggle('H2: 希望休/有休', value=True, key='h2')
-    with h_cols[2]: params_ui['h3_on'] = st.toggle('H3: 役職者配置', value=True, key='h3')
-    with h_cols[3]: params_ui['h5_on'] = st.toggle('H5: 日曜出勤上限', value=True, key='h5')
+    with h_cols[0]:
+        params_ui['h1_on'] = st.toggle('H1: 月間休日数', value=True, key='h1')
+        params_ui['h1_penalty'] = st.number_input("H1 Penalty", value=1000, disabled=not params_ui['h1_on'], key='h1p')
+    with h_cols[1]:
+        params_ui['h2_on'] = st.toggle('H2: 希望休/有休', value=True, key='h2')
+        params_ui['h2_penalty'] = st.number_input("H2 Penalty", value=1000, disabled=not params_ui['h2_on'], key='h2p')
+    with h_cols[2]:
+        params_ui['h3_on'] = st.toggle('H3: 役職者配置', value=True, key='h3')
+        params_ui['h3_penalty'] = st.number_input("H3 Penalty", value=1000, disabled=not params_ui['h3_on'], key='h3p')
+    with h_cols[3]:
+        params_ui['h5_on'] = st.toggle('H5: 日曜出勤上限', value=True, key='h5')
+        params_ui['h5_penalty'] = st.number_input("H5 Penalty", value=1000, disabled=not params_ui['h5_on'], key='h5p')
+    
+    h_cols_new = st.columns(1)
+    with h_cols_new[0]:
+        params_ui['h_weekend_limit_penalty'] = st.number_input("土日上限/土曜上限/日曜上限 Penalty", value=1000, key='h_weekend_limit_penalty')
     
     # H4は廃止されたためUIから削除
     params_ui['h4_on'] = False
