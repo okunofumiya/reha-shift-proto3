@@ -949,7 +949,7 @@ if 'app_initialized' not in st.session_state:
         save_settings_to_sheet(spreadsheet, st.session_state.saved_settings)
     st.session_state.app_initialized = True
 
-        st.exception(e)
+    st.exception(e)
 
 # --- スプレッドシート連携 --- 
 def get_spreadsheet():
