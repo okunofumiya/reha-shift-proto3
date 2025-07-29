@@ -440,43 +440,134 @@ def solve_shift_model(params):
         return False, pd.DataFrame(), pd.DataFrame(), message, None
 
 # --- Streamlit UI ---
-st.set_page_config(layout="wide")
+'''st.set_page_config(layout="wide")
 st.title('リハビリテーション科 勤務表作成アプリ')
 today = datetime.now()
 next_month_date = today + relativedelta(months=1)
-default_year = next_month_date.year
-default_month_index = next_month_date.month - 1
+
+# --- パラメータ管理 ---
+# UIの各ウィジェットのデフォルト値を定義
+default_params = {
+    "year": next_month_date.year,
+    "month": next_month_date.month,
+    "is_saturday_special": False,
+    "target_pt_sun": 10, "target_ot_sun": 5, "target_st_sun": 3,
+    "target_pt_sat": 4, "target_ot_sat": 2, "target_st_sat": 1,
+    "tolerance": 1,
+    "tri_penalty_weight": 8,
+    "h1_on": True, "h2_on": True, "h3_on": True, "h5_on": True,
+    "s0_on": True, "s0_penalty": 200,
+    "s1a_on": True, "s1a_penalty": 50,
+    "s1b_on": True, "s1b_penalty": 40,
+    "s1c_on": True, "s1c_penalty": 60,
+    "s2_on": True, "s2_penalty": 25,
+    "s3_on": True, "s3_penalty": 10,
+    "s4_on": True, "s4_penalty": 8, # tri_penalty_weightと連動
+    "s5_on": True, "s5_penalty": 5,
+    "s6_on": True, "s6_penalty": 2, "s6_penalty_heavy": 4,
+    "high_flat_penalty": False
+}
+
+# セッションステートの初期化
+if 'params' not in st.session_state:
+    st.session_state.params = default_params.copy()
+if 'saved_settings' not in st.session_state:
+    st.session_state.saved_settings = {} # {設定名: パラメータdict}
+if 'confirm_overwrite' not in st.session_state:
+    st.session_state.confirm_overwrite = None # 上書き確認中の設定名
+
+# --- UI ---
 with st.expander("▼ 各種パラメータを設定する", expanded=True):
+    # --- 設定の読込と保存 ---
+    st.subheader("設定の読込と保存")
+    settings_cols = st.columns([2, 1, 2, 1])
+    
+    with settings_cols[0]:
+        # 保存されている設定がまだない場合は空のリスト
+        saved_names = list(st.session_state.saved_settings.keys())
+        selected_setting = st.selectbox(
+            "保存済み設定", options=saved_names, 
+            label_visibility="collapsed", key="setting_to_load"
+        )
+    with settings_cols[1]:
+        if st.button("呼び出す", use_container_width=True):
+            if selected_setting in st.session_state.saved_settings:
+                st.session_state.params = st.session_state.saved_settings[selected_setting].copy()
+                st.success(f"設定「{selected_setting}」を読み込みました。")
+                st.rerun() # UIに値を即時反映させる
+
+    with settings_cols[2]:
+        new_setting_name = st.text_input(
+            "新しい設定名", placeholder="現在の設定に名前を付けて保存", 
+            label_visibility="collapsed", key="new_setting_name"
+        )
+    with settings_cols[3]:
+        if st.button("保存", use_container_width=True):
+            if new_setting_name:
+                # 上書き確認
+                if new_setting_name in st.session_state.saved_settings:
+                    st.session_state.confirm_overwrite = new_setting_name
+                else:
+                    # 新規保存
+                    current_params = st.session_state.params.copy()
+                    st.session_state.saved_settings[new_setting_name] = current_params
+                    save_settings_to_sheet(get_spreadsheet(), st.session_state.saved_settings)
+                    st.success(f"設定「{new_setting_name}」を保存しました。")
+            else:
+                st.warning("設定名を入力してください。")
+
+    # 上書き確認のUI
+    if st.session_state.confirm_overwrite:
+        st.warning(f"**「{st.session_state.confirm_overwrite}」** は既に存在します。上書きしますか？")
+        overwrite_cols = st.columns(8)
+        with overwrite_cols[0]:
+            if st.button("はい、上書きします", type="primary"):
+                name_to_overwrite = st.session_state.confirm_overwrite
+                current_params = st.session_state.params.copy()
+                st.session_state.saved_settings[name_to_overwrite] = current_params
+                save_settings_to_sheet(get_spreadsheet(), st.session_state.saved_settings)
+                st.session_state.confirm_overwrite = None # 確認状態をリセット
+                st.success(f"設定「{name_to_overwrite}」を上書き保存しました。")
+                st.rerun()
+        with overwrite_cols[1]:
+            if st.button("いいえ"):
+                st.session_state.confirm_overwrite = None # 確認状態をリセット
+                st.rerun()
+
+    st.markdown("---")
+
+    # --- パラメータ設定UI ---
     c1, c2 = st.columns([1, 2])
     with c1:
         st.subheader("対象年月")
-        year = st.number_input("年（西暦）", min_value=default_year - 5, max_value=default_year + 5, value=default_year, label_visibility="collapsed")
-        month = st.selectbox("月", options=list(range(1, 13)), index=default_month_index, label_visibility="collapsed")
+        st.session_state.params["year"] = st.number_input("年", min_value=today.year - 5, max_value=today.year + 5, value=st.session_state.params["year"])
+        st.session_state.params["month"] = st.selectbox("月", options=list(range(1, 13)), index=st.session_state.params["month"] - 1)
         
         st.subheader("緩和条件と優先度")
-        tolerance = st.number_input("PT/OT許容誤差(±)", min_value=0, max_value=5, value=1, help="PT/OTの合計人数が目標通りなら、それぞれの人数がこの値までずれてもペナルティを課しません。")
-        tri_penalty_weight = st.slider("準希望休(△)の優先度", min_value=0, max_value=20, value=8, help="値が大きいほど△希望が尊重されます。")
+        st.session_state.params["tolerance"] = st.number_input("PT/OT許容誤差(±)", min_value=0, max_value=5, value=st.session_state.params["tolerance"])
+        st.session_state.params["tri_penalty_weight"] = st.slider("準希望休(△)の優先度", min_value=0, max_value=20, value=st.session_state.params["tri_penalty_weight"])
+        st.session_state.params["s4_penalty"] = st.session_state.params["tri_penalty_weight"] # S4ペナルティを連動
 
     with c2:
         st.subheader("週末の出勤人数設定")
-        is_saturday_special = st.toggle("土曜日の人数調整を有効にする", value=False, help="ONにすると、土曜日を特別日として扱い、下の目標人数に基づいて出勤者を調整します。")
+        st.session_state.params["is_saturday_special"] = st.toggle("土曜日の人数調整を有効にする", value=st.session_state.params["is_saturday_special"])
 
         sun_tab, sat_tab = st.tabs(["日曜日の目標人数", "土曜日の目標人数"])
-
         with sun_tab:
             c2_1, c2_2, c2_3 = st.columns(3)
-            with c2_1: target_pt_sun = st.number_input("PT目標", min_value=0, value=10, step=1, key='pt_sun')
-            with c2_2: target_ot_sun = st.number_input("OT目標", min_value=0, value=5, step=1, key='ot_sun')
-            with c2_3: target_st_sun = st.number_input("ST目標", min_value=0, value=3, step=1, key='st_sun')
-
+            st.session_state.params["target_pt_sun"] = c2_1.number_input("PT目標", min_value=0, value=st.session_state.params["target_pt_sun"], step=1, key='pt_sun')
+            st.session_state.params["target_ot_sun"] = c2_2.number_input("OT目標", min_value=0, value=st.session_state.params["target_ot_sun"], step=1, key='ot_sun')
+            st.session_state.params["target_st_sun"] = c2_3.number_input("ST目標", min_value=0, value=st.session_state.params["target_st_sun"], step=1, key='st_sun')
         with sat_tab:
             c2_1, c2_2, c2_3 = st.columns(3)
-            with c2_1: target_pt_sat = st.number_input("PT目標", min_value=0, value=4, step=1, key='pt_sat', disabled=not is_saturday_special)
-            with c2_2: target_ot_sat = st.number_input("OT目標", min_value=0, value=2, step=1, key='ot_sat', disabled=not is_saturday_special)
-            with c2_3: target_st_sat = st.number_input("ST目標", min_value=0, value=1, step=1, key='st_sat', disabled=not is_saturday_special)
-    
+            is_sat_disabled = not st.session_state.params["is_saturday_special"]
+            st.session_state.params["target_pt_sat"] = c2_1.number_input("PT目標", min_value=0, value=st.session_state.params["target_pt_sat"], step=1, key='pt_sat', disabled=is_sat_disabled)
+            st.session_state.params["target_ot_sat"] = c2_2.number_input("OT目標", min_value=0, value=st.session_state.params["target_ot_sat"], step=1, key='ot_sat', disabled=is_sat_disabled)
+            st.session_state.params["target_st_sat"] = c2_3.number_input("ST目標", min_value=0, value=st.session_state.params["target_st_sat"], step=1, key='st_sat', disabled=is_sat_disabled)
+
     st.markdown("---")
-    st.subheader(f"{year}年{month}月のイベント設定（各日の特別業務単位数を入力）")
+    st.subheader(f"{st.session_state.params['year']}年{st.session_state.params['month']}月のイベント設定（各日の特別業務単位数を入力）")
+    # (イベント設定UIは変更なし)
     st.info("「全体」タブは職種を問わない業務、「PT/OT/ST」タブは各職種固有の業務を入力します。「全体」に入力された業務は、各職種の標準的な業務量比で自動的に按分されます。")
     
     event_tabs = st.tabs(["全体", "PT", "OT", "ST"])
@@ -485,8 +576,8 @@ with st.expander("▼ 各種パラメータを設定する", expanded=True):
     for i, tab_name in enumerate(['all', 'pt', 'ot', 'st']):
         with event_tabs[i]:
             day_counter = 1
-            num_days_in_month = calendar.monthrange(year, month)[1]
-            first_day_weekday = calendar.weekday(year, month, 1)
+            num_days_in_month = calendar.monthrange(st.session_state.params['year'], st.session_state.params['month'])[1]
+            first_day_weekday = calendar.weekday(st.session_state.params['year'], st.session_state.params['month'], 1)
             
             cal_cols = st.columns(7)
             weekdays_jp = ['月', '火', '水', '木', '金', '土', '日']
@@ -499,16 +590,13 @@ with st.expander("▼ 各種パラメータを設定する", expanded=True):
                         cols[day_of_week].empty()
                         continue
                     with cols[day_of_week]:
-                        is_sunday = calendar.weekday(year, month, day_counter) == 6
+                        is_sunday = calendar.weekday(st.session_state.params['year'], st.session_state.params['month'], day_counter) == 6
                         event_units_input[tab_name][day_counter] = st.number_input(
                             label=f"{day_counter}日", value=0, step=10, disabled=is_sunday, 
-                            key=f"event_{tab_name}_{year}_{month}_{day_counter}"
+                            key=f"event_{tab_name}_{st.session_state.params['year']}_{st.session_state.params['month']}_{day_counter}"
                         )
                     day_counter += 1
                 if day_counter > num_days_in_month: break
-
-    st.markdown("---")
-    create_button = st.button('勤務表を作成', type="primary", use_container_width=True)
 
 with st.expander("▼ ルール検証モード（上級者向け）"):
     st.warning("注意: 各ルールのON/OFFやペナルティ値を変更することで、意図しない結果や、解が見つからない状況が発生する可能性があります。")
@@ -516,55 +604,57 @@ with st.expander("▼ ルール検証モード（上級者向け）"):
     st.subheader("基本ルール（違反時にペナルティが発生）")
     st.info("これらのルールは通常ONですが、どうしても解が見つからない場合にOFFにできます。違反時のペナルティは一律1000です。")
     h_cols = st.columns(4)
-    params_ui = {}
-    with h_cols[0]: params_ui['h1_on'] = st.toggle('H1: 月間休日数', value=True, key='h1')
-    with h_cols[1]: params_ui['h2_on'] = st.toggle('H2: 希望休/有休', value=True, key='h2')
-    with h_cols[2]: params_ui['h3_on'] = st.toggle('H3: 役職者配置', value=True, key='h3')
-    with h_cols[3]: params_ui['h5_on'] = st.toggle('H5: 日曜出勤上限', value=True, key='h5')
+    with h_cols[0]: st.session_state.params['h1_on'] = st.toggle('H1: 月間休日数', value=st.session_state.params['h1_on'], key='h1')
+    with h_cols[1]: st.session_state.params['h2_on'] = st.toggle('H2: 希望休/有休', value=st.session_state.params['h2_on'], key='h2')
+    with h_cols[2]: st.session_state.params['h3_on'] = st.toggle('H3: 役職者配置', value=st.session_state.params['h3_on'], key='h3')
+    with h_cols[3]: st.session_state.params['h5_on'] = st.toggle('H5: 週末出勤上限', value=st.session_state.params['h5_on'], key='h5')
     
-    # H4は廃止されたためUIから削除
-    params_ui['h4_on'] = False
     st.markdown("---")
     st.subheader("ソフト制約のON/OFFとペナルティ設定")
     st.info("S0/S2の週休ルールは、半日休を0.5日分の休みとしてカウントし、完全な週は1.5日以上、不完全な週は0.5日以上の休日確保を目指します。")
     s_cols = st.columns(4)
     with s_cols[0]:
-        params_ui['s0_on'] = st.toggle('S0: 完全週の週休1.5日', value=True, key='s0')
-        params_ui['s0_penalty'] = st.number_input("S0 Penalty", value=200, disabled=not params_ui['s0_on'], key='s0p')
+        st.session_state.params['s0_on'] = st.toggle('S0: 完全週の週休1.5日', value=st.session_state.params['s0_on'], key='s0')
+        st.session_state.params['s0_penalty'] = st.number_input("S0 Penalty", value=st.session_state.params['s0_penalty'], disabled=not st.session_state.params['s0_on'], key='s0p')
     with s_cols[1]:
-        params_ui['s2_on'] = st.toggle('S2: 不完全週の週休0.5日', value=True, key='s2')
-        params_ui['s2_penalty'] = st.number_input("S2 Penalty", value=25, disabled=not params_ui['s2_on'], key='s2p')
+        st.session_state.params['s2_on'] = st.toggle('S2: 不完全週の週休0.5日', value=st.session_state.params['s2_on'], key='s2')
+        st.session_state.params['s2_penalty'] = st.number_input("S2 Penalty", value=st.session_state.params['s2_penalty'], disabled=not st.session_state.params['s2_on'], key='s2p')
     with s_cols[2]:
-        params_ui['s3_on'] = st.toggle('S3: 外来同時休', value=True, key='s3')
-        params_ui['s3_penalty'] = st.number_input("S3 Penalty", value=10, disabled=not params_ui['s3_on'], key='s3p')
+        st.session_state.params['s3_on'] = st.toggle('S3: 外来同時休', value=st.session_state.params['s3_on'], key='s3')
+        st.session_state.params['s3_penalty'] = st.number_input("S3 Penalty", value=st.session_state.params['s3_penalty'], disabled=not st.session_state.params['s3_on'], key='s3p')
     with s_cols[3]:
-        params_ui['s4_on'] = st.toggle('S4: 準希望休(△)尊重', value=True, key='s4')
-        params_ui['s4_penalty'] = st.number_input("S4 Penalty", value=tri_penalty_weight, disabled=not params_ui['s4_on'], key='s4p')
+        st.session_state.params['s4_on'] = st.toggle('S4: 準希望休(△)尊重', value=st.session_state.params['s4_on'], key='s4')
+        st.session_state.params['s4_penalty'] = st.number_input("S4 Penalty", value=st.session_state.params['s4_penalty'], disabled=not st.session_state.params['s4_on'], key='s4p')
+    
     s_cols2 = st.columns(4)
     with s_cols2[0]:
-        params_ui['s5_on'] = st.toggle('S5: 回復期配置', value=True, key='s5')
-        params_ui['s5_penalty'] = st.number_input("S5 Penalty", value=5, disabled=not params_ui['s5_on'], key='s5p')
+        st.session_state.params['s5_on'] = st.toggle('S5: 回復期配置', value=st.session_state.params['s5_on'], key='s5')
+        st.session_state.params['s5_penalty'] = st.number_input("S5 Penalty", value=st.session_state.params['s5_penalty'], disabled=not st.session_state.params['s5_on'], key='s5p')
     with s_cols2[1]:
-        params_ui['s6_on'] = st.toggle('S6: 職種別 業務負荷平準化', value=True, key='s6')
+        st.session_state.params['s6_on'] = st.toggle('S6: 職種別 業務負荷平準化', value=st.session_state.params['s6_on'], key='s6')
         c_s6_1, c_s6_2 = st.columns(2)
-        params_ui['s6_penalty'] = c_s6_1.number_input("S6 標準P", value=2, disabled=not params_ui['s6_on'], key='s6p')
-        params_ui['s6_penalty_heavy'] = c_s6_2.number_input("S6 強化P", value=4, disabled=not params_ui['s6_on'], key='s6ph')
+        st.session_state.params['s6_penalty'] = c_s6_1.number_input("S6 標準P", value=st.session_state.params['s6_penalty'], disabled=not st.session_state.params['s6_on'], key='s6p')
+        st.session_state.params['s6_penalty_heavy'] = c_s6_2.number_input("S6 強化P", value=st.session_state.params['s6_penalty_heavy'], disabled=not st.session_state.params['s6_on'], key='s6ph')
     with s_cols2[2]:
         st.markdown("") 
     with s_cols2[3]:
-        params_ui['high_flat_penalty'] = st.toggle('平準化ペナルティ強化', value=False, key='high_flat', help="S6のペナルティを「標準P」ではなく「強化P」で計算します。")
+        st.session_state.params['high_flat_penalty'] = st.toggle('平準化ペナルティ強化', value=st.session_state.params['high_flat_penalty'], key='high_flat', help="S6のペナルティを「標準P」ではなく「強化P」で計算します。")
         
-    st.markdown("##### S1: 日曜人数目標")
+    st.markdown("##### S1: 週末人数目標")
     s_cols3 = st.columns(3)
     with s_cols3[0]:
-        params_ui['s1a_on'] = st.toggle('S1-a: PT/OT合計', value=True, key='s1a')
-        params_ui['s1a_penalty'] = st.number_input("S1-a Penalty", value=50, disabled=not params_ui['s1a_on'], key='s1ap')
+        st.session_state.params['s1a_on'] = st.toggle('S1-a: PT/OT合計', value=st.session_state.params['s1a_on'], key='s1a')
+        st.session_state.params['s1a_penalty'] = st.number_input("S1-a Penalty", value=st.session_state.params['s1a_penalty'], disabled=not st.session_state.params['s1a_on'], key='s1ap')
     with s_cols3[1]:
-        params_ui['s1b_on'] = st.toggle('S1-b: PT/OT個別', value=True, key='s1b')
-        params_ui['s1b_penalty'] = st.number_input("S1-b Penalty", value=40, disabled=not params_ui['s1b_on'], key='s1bp')
+        st.session_state.params['s1b_on'] = st.toggle('S1-b: PT/OT個別', value=st.session_state.params['s1b_on'], key='s1b')
+        st.session_state.params['s1b_penalty'] = st.number_input("S1-b Penalty", value=st.session_state.params['s1b_penalty'], disabled=not st.session_state.params['s1b_on'], key='s1bp')
     with s_cols3[2]:
-        params_ui['s1c_on'] = st.toggle('S1-c: ST目標', value=True, key='s1c')
-        params_ui['s1c_penalty'] = st.number_input("S1-c Penalty", value=60, disabled=not params_ui['s1c_on'], key='s1cp')
+        st.session_state.params['s1c_on'] = st.toggle('S1-c: ST目標', value=st.session_state.params['s1c_on'], key='s1c')
+        st.session_state.params['s1c_penalty'] = st.number_input("S1-c Penalty", value=st.session_state.params['s1c_penalty'], disabled=not st.session_state.params['s1c_on'], key='s1cp')
+
+st.markdown("---")
+create_button = st.button('勤務表を作成', type="primary", use_container_width=True)
+''
 
 if create_button:
     try:
@@ -654,6 +744,51 @@ if create_button:
     except Exception as e:
         st.error(f'予期せぬエラーが発生しました: {e}')
         st.exception(e)
+
+# --- スプレッドシート連携 --- 
+def get_spreadsheet():
+    creds_dict = st.secrets["gcp_service_account"]
+    sa = gspread.service_account_from_dict(creds_dict)
+    return sa.open("設定ファイル（土井）")
+
+def load_settings_from_sheet(spreadsheet):
+    try:
+        worksheet = spreadsheet.worksheet("パラメータ設定")
+        records = worksheet.get_all_records()
+        settings = {}
+        for record in records:
+            try:
+                settings[record['設定名']] = json.loads(record['パラメータJSON'])
+            except (json.JSONDecodeError, KeyError):
+                continue # JSONの解析に失敗した行やキーがない行はスキップ
+        return settings
+    except gspread.WorksheetNotFound:
+        return {} # シートがない場合は空の設定を返す
+
+def save_settings_to_sheet(spreadsheet, settings):
+    try:
+        worksheet = spreadsheet.worksheet("パラメータ設定")
+    except gspread.WorksheetNotFound:
+        worksheet = spreadsheet.add_worksheet(title="パラメータ設定", rows="100", cols="2")
+        worksheet.update('A1:B1', [['設定名', 'パラメータJSON']])
+    
+    # ヘッダーを除いた既存のデータをクリア
+    worksheet.clear(start='A2', end=f'B{worksheet.row_count}')
+    
+    # 新しいデータを書き込み
+    if settings:
+        data_to_write = [[name, json.dumps(params)] for name, params in settings.items()]
+        worksheet.update(f'A2:B{len(data_to_write) + 1}', data_to_write)
+
+# --- アプリ起動時の処理 ---
+if 'app_initialized' not in st.session_state:
+    spreadsheet = get_spreadsheet()
+    st.session_state.saved_settings = load_settings_from_sheet(spreadsheet)
+    # デフォルト設定を保存（まだ存在しない場合）
+    if "デフォルト" not in st.session_state.saved_settings:
+        st.session_state.saved_settings["デフォルト"] = default_params.copy()
+        save_settings_to_sheet(spreadsheet, st.session_state.saved_settings)
+    st.session_state.app_initialized = True
 
 st.markdown("---")
 st.markdown(f"<div style='text-align: right; color: grey;'>{APP_CREDIT} | Version: {APP_VERSION}</div>", unsafe_allow_html=True)
