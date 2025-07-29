@@ -179,30 +179,20 @@ def solve_shift_model(params):
             model.Add(sum(shifts[(s, d)] for s in managers) > 0).OnlyEnforceIf(no_manager.Not())
             penalties.append(h_penalty * no_manager)
     
-    ### 変更点 2: 古いH4とH5のルールを無効化 ###
-    # H4はUIから削除しても良いが、ここではオフの場合の動作を記述
-    if params.get('h4_on', False):
-        st.warning("H4は廃止されました。職員一覧の「日曜上限」に0を入力してください。")
-        # 何もしない
-
-    # H5もUIから削除しても良い
     if params.get('h5_on', False):
-        st.warning("H5は廃止されました。「日曜上限」ルールに統合されています。")
-        # 何もしない
+        # H5: 日曜出勤上限 (ソフト制約)
+        for s in staff:
+            sunday_limit = int(staff_info[s]['日曜上限'])
+            num_sundays_worked = sum(shifts[(s, d)] for d in sundays)
+            
+            # 上限を超えた出勤回数を計算
+            over_limit = model.NewIntVar(0, len(sundays), f'sunday_over_{s}')
+            model.Add(over_limit >= num_sundays_worked - sunday_limit)
+            model.Add(over_limit >= 0)
+            
+            # 上限を超えた回数に対してペナルティを課す
+            penalties.append(h_penalty * over_limit)
 
-    ### 変更点 3: 新しい日曜上限の制約 (ソフト制約化) ###
-    for s in staff:
-        sunday_limit = int(staff_info[s]['日曜上限'])
-        num_sundays_worked = sum(shifts[(s, d)] for d in sundays)
-        
-        # 上限を超えた出勤回数を計算
-        over_limit = model.NewIntVar(0, len(sundays), f'sunday_over_{s}')
-        model.Add(over_limit >= num_sundays_worked - sunday_limit)
-        model.Add(over_limit >= 0)
-        
-        # 上限を超えた回数に対してペナルティを課す
-        penalties.append(h_penalty * over_limit)
-    
     ### 変更点 4: 2段階割り当てのための新しいソフト制約 ###
     # このペナルティの値は、他のペナルティより十分大きいが、必須ではない程度の値に設定
     sunday_overwork_penalty = 50 
@@ -410,14 +400,17 @@ with st.expander("▼ 各種パラメータを設定する", expanded=True):
 with st.expander("▼ ルール検証モード（上級者向け）"):
     st.warning("注意: 各ルールのON/OFFやペナルティ値を変更することで、意図しない結果や、解が見つからない状況が発生する可能性があります。")
     st.markdown("---")
-    st.subheader("ハード制約のON/OFF")
-    h_cols = st.columns(5)
+    st.subheader("基本ルール（違反時にペナルティが発生）")
+    st.info("これらのルールは通常ONですが、どうしても解が見つからない場合にOFFにできます。違反時のペナルティは一律1000です。")
+    h_cols = st.columns(4)
     params_ui = {}
     with h_cols[0]: params_ui['h1_on'] = st.toggle('H1: 月間休日数', value=True, key='h1')
     with h_cols[1]: params_ui['h2_on'] = st.toggle('H2: 希望休/有休', value=True, key='h2')
     with h_cols[2]: params_ui['h3_on'] = st.toggle('H3: 役職者配置', value=True, key='h3')
-    with h_cols[3]: params_ui['h4_on'] = st.toggle('H4: 特定役割日曜休', value=True, key='h4')
-    with h_cols[4]: params_ui['h5_on'] = st.toggle('H5: 日曜出勤上限', value=True, key='h5')
+    with h_cols[3]: params_ui['h5_on'] = st.toggle('H5: 日曜出勤上限', value=True, key='h5')
+    
+    # H4は廃止されたためUIから削除
+    params_ui['h4_on'] = False
     st.markdown("---")
     st.subheader("ソフト制約のON/OFFとペナルティ設定")
     st.info("S0/S2の週休ルールは、半日休を0.5日分の休みとしてカウントし、完全な週は1.5日以上、不完全な週は0.5日以上の休日確保を目指します。")
