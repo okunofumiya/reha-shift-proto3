@@ -118,8 +118,16 @@ def solve_shift_model(params):
     staff_info = params['staff_df'].set_index('職員番号').to_dict('index')
     params['staff_info'] = staff_info 
     params['staff'] = staff 
-    sundays = [d for d in days if calendar.weekday(year, month, d) == 6]; weekdays = [d for d in days if d not in sundays]
-    params['sundays'] = sundays; params['weekdays'] = weekdays; params['days'] = days 
+
+    # 日付の分類 (土曜日が特別日かどうかを考慮)
+    sundays = [d for d in days if calendar.weekday(year, month, d) == 6]
+    saturdays = [d for d in days if calendar.weekday(year, month, d) == 5]
+    special_saturdays = saturdays if params.get('is_saturday_special', False) else []
+    weekdays = [d for d in days if d not in sundays and d not in special_saturdays]
+    params['sundays'] = sundays
+    params['special_saturdays'] = special_saturdays
+    params['weekdays'] = weekdays
+    params['days'] = days 
     
     managers = [s for s in staff if pd.notna(staff_info[s]['役職'])]; pt_staff = [s for s in staff if staff_info[s]['職種'] == '理学療法士']
     ot_staff = [s for s in staff if staff_info[s]['職種'] == '作業療法士']; st_staff = [s for s in staff if staff_info[s]['職種'] == '言語聴覚士']
@@ -220,6 +228,37 @@ def solve_shift_model(params):
             # 上限を超えた回数に対してペナルティを課す
             penalties.append(h_penalty * over_limit)
 
+    ### 変更点 3: 新しい日曜上限の制約 (ソフト制約化) ###
+    # 土日上限、日曜上限、土曜上限のルールを適用
+    for s in staff:
+        # スプレッドシートの値を取得。空欄の場合はNoneになるように調整。
+        sun_sat_limit = pd.to_numeric(staff_info[s].get('土日上限'), errors='coerce')
+        sun_limit = pd.to_numeric(staff_info[s].get('日曜上限'), errors='coerce')
+        sat_limit = pd.to_numeric(staff_info[s].get('土曜上限'), errors='coerce')
+
+        # 土日上限が設定されている場合
+        if pd.notna(sun_sat_limit):
+            num_sun_sat_worked = sum(shifts[(s, d)] for d in sundays + special_saturdays)
+            over_limit = model.NewIntVar(0, len(sundays) + len(special_saturdays), f'sun_sat_over_{s}')
+            model.Add(over_limit >= num_sun_sat_worked - int(sun_sat_limit))
+            model.Add(over_limit >= 0)
+            penalties.append(h_penalty * over_limit)
+        # 土日上限がなく、日曜または土曜上限が設定されている場合
+        else:
+            if pd.notna(sun_limit):
+                num_sundays_worked = sum(shifts[(s, d)] for d in sundays)
+                over_limit = model.NewIntVar(0, len(sundays), f'sunday_over_{s}')
+                model.Add(over_limit >= num_sundays_worked - int(sun_limit))
+                model.Add(over_limit >= 0)
+                penalties.append(h_penalty * over_limit)
+            
+            if pd.notna(sat_limit) and special_saturdays:
+                num_saturdays_worked = sum(shifts[(s, d)] for d in special_saturdays)
+                over_limit = model.NewIntVar(0, len(special_saturdays), f'saturday_over_{s}')
+                model.Add(over_limit >= num_saturdays_worked - int(sat_limit))
+                model.Add(over_limit >= 0)
+                penalties.append(h_penalty * over_limit)
+
     ### 変更点 4: 2段階割り当てのための新しいソフト制約 ###
     # このペナルティの値は、他のペナルティより十分大きいが、必須ではない程度の値に設定
     sunday_overwork_penalty = 50 
@@ -271,15 +310,50 @@ def solve_shift_model(params):
                     violation = model.NewBoolVar(f'p_w_v_s{s_idx}_w{w_idx}'); model.Add(total_holiday_value < 1).OnlyEnforceIf(violation); model.Add(total_holiday_value >= 1).OnlyEnforceIf(violation.Not()); penalties.append(params['s2_penalty'] * violation)
     
     if any([params['s1a_on'], params['s1b_on'], params['s1c_on']]):
-        for d in sundays:
-            pt_on_sunday = sum(shifts[(s, d)] for s in pt_staff); ot_on_sunday = sum(shifts[(s, d)] for s in ot_staff); st_on_sunday = sum(shifts[(s, d)] for s in st_staff)
-            if params['s1a_on']:
-                total_pt_ot = pt_on_sunday + ot_on_sunday; total_diff = model.NewIntVar(-50, 50, f't_d_{d}'); model.Add(total_diff == total_pt_ot - (params['target_pt'] + params['target_ot'])); abs_total_diff = model.NewIntVar(0, 50, f'a_t_d_{d}'); model.AddAbsEquality(abs_total_diff, total_diff); penalties.append(params['s1a_penalty'] * abs_total_diff)
-            if params['s1b_on']:
-                pt_diff = model.NewIntVar(-30, 30, f'p_d_{d}'); model.Add(pt_diff == pt_on_sunday - params['target_pt']); pt_penalty = model.NewIntVar(0, 30, f'p_p_{d}'); model.Add(pt_penalty >= pt_diff - params['tolerance']); model.Add(pt_penalty >= -pt_diff - params['tolerance']); penalties.append(params['s1b_penalty'] * pt_penalty)
-                ot_diff = model.NewIntVar(-30, 30, f'o_d_{d}'); model.Add(ot_diff == ot_on_sunday - params['target_ot']); ot_penalty = model.NewIntVar(0, 30, f'o_p_{d}'); model.Add(ot_penalty >= ot_diff - params['tolerance']); model.Add(ot_penalty >= -ot_diff - params['tolerance']); penalties.append(params['s1b_penalty'] * ot_penalty)
-            if params['s1c_on']:
-                st_diff = model.NewIntVar(-10, 10, f's_d_{d}'); model.Add(st_diff == st_on_sunday - params['target_st']); abs_st_diff = model.NewIntVar(0, 10, f'a_s_d_{d}'); model.AddAbsEquality(abs_st_diff, st_diff); penalties.append(params['s1c_penalty'] * abs_st_diff)
+        # S1: 週末の人数目標
+        special_days_map = {'sun': sundays}
+        if special_saturdays:
+            special_days_map['sat'] = special_saturdays
+
+        for day_type, special_days in special_days_map.items():
+            target_pt = params['targets'][day_type]['pt']
+            target_ot = params['targets'][day_type]['ot']
+            target_st = params['targets'][day_type]['st']
+
+            for d in special_days:
+                pt_on_day = sum(shifts[(s, d)] for s in pt_staff)
+                ot_on_day = sum(shifts[(s, d)] for s in ot_staff)
+                st_on_day = sum(shifts[(s, d)] for s in st_staff)
+
+                if params['s1a_on']:
+                    total_pt_ot = pt_on_day + ot_on_day
+                    total_diff = model.NewIntVar(-50, 50, f't_d_{day_type}_{d}')
+                    model.Add(total_diff == total_pt_ot - (target_pt + target_ot))
+                    abs_total_diff = model.NewIntVar(0, 50, f'a_t_d_{day_type}_{d}')
+                    model.AddAbsEquality(abs_total_diff, total_diff)
+                    penalties.append(params['s1a_penalty'] * abs_total_diff)
+                
+                if params['s1b_on']:
+                    pt_diff = model.NewIntVar(-30, 30, f'p_d_{day_type}_{d}')
+                    model.Add(pt_diff == pt_on_day - target_pt)
+                    pt_penalty = model.NewIntVar(0, 30, f'p_p_{day_type}_{d}')
+                    model.Add(pt_penalty >= pt_diff - params['tolerance'])
+                    model.Add(pt_penalty >= -pt_diff - params['tolerance'])
+                    penalties.append(params['s1b_penalty'] * pt_penalty)
+
+                    ot_diff = model.NewIntVar(-30, 30, f'o_d_{day_type}_{d}')
+                    model.Add(ot_diff == ot_on_day - target_ot)
+                    ot_penalty = model.NewIntVar(0, 30, f'o_p_{day_type}_{d}')
+                    model.Add(ot_penalty >= ot_diff - params['tolerance'])
+                    model.Add(ot_penalty >= -ot_diff - params['tolerance'])
+                    penalties.append(params['s1b_penalty'] * ot_penalty)
+
+                if params['s1c_on']:
+                    st_diff = model.NewIntVar(-10, 10, f's_d_{day_type}_{d}')
+                    model.Add(st_diff == st_on_day - target_st)
+                    abs_st_diff = model.NewIntVar(0, 10, f'a_s_d_{day_type}_{d}')
+                    model.AddAbsEquality(abs_st_diff, st_diff)
+                    penalties.append(params['s1c_penalty'] * abs_st_diff)
     if params['s3_on']:
         for d in days:
             num_gairai_off = sum(1 - shifts[(s, d)] for s in gairai_staff); penalty = model.NewIntVar(0, len(gairai_staff), f'g_p_{d}'); model.Add(penalty >= num_gairai_off - 1); penalties.append(params['s3_penalty'] * penalty)
@@ -373,21 +447,33 @@ next_month_date = today + relativedelta(months=1)
 default_year = next_month_date.year
 default_month_index = next_month_date.month - 1
 with st.expander("▼ 各種パラメータを設定する", expanded=True):
-    c1, c2, c3 = st.columns(3)
+    c1, c2 = st.columns([1, 2])
     with c1:
-        st.subheader("対象年月とファイル")
-        year = st.number_input("年（西暦）", min_value=default_year - 5, max_value=default_year + 5, value=default_year)
-        month = st.selectbox("月", options=list(range(1, 13)), index=default_month_index)
-    with c2:
-        st.subheader("日曜日の出勤人数設定")
-        c2_1, c2_2, c2_3 = st.columns(3)
-        with c2_1: target_pt = st.number_input("PT目標", min_value=0, value=10, step=1)
-        with c2_2: target_ot = st.number_input("OT目標", min_value=0, value=5, step=1)
-        with c2_3: target_st = st.number_input("ST目標", min_value=0, value=3, step=1)
-    with c3:
+        st.subheader("対象年月")
+        year = st.number_input("年（西暦）", min_value=default_year - 5, max_value=default_year + 5, value=default_year, label_visibility="collapsed")
+        month = st.selectbox("月", options=list(range(1, 13)), index=default_month_index, label_visibility="collapsed")
+        
         st.subheader("緩和条件と優先度")
         tolerance = st.number_input("PT/OT許容誤差(±)", min_value=0, max_value=5, value=1, help="PT/OTの合計人数が目標通りなら、それぞれの人数がこの値までずれてもペナルティを課しません。")
         tri_penalty_weight = st.slider("準希望休(△)の優先度", min_value=0, max_value=20, value=8, help="値が大きいほど△希望が尊重されます。")
+
+    with c2:
+        st.subheader("週末の出勤人数設定")
+        is_saturday_special = st.toggle("土曜日の人数調整を有効にする", value=False, help="ONにすると、土曜日を特別日として扱い、下の目標人数に基づいて出勤者を調整します。")
+
+        sun_tab, sat_tab = st.tabs(["日曜日の目標人数", "土曜日の目標人数"])
+
+        with sun_tab:
+            c2_1, c2_2, c2_3 = st.columns(3)
+            with c2_1: target_pt_sun = st.number_input("PT目標", min_value=0, value=10, step=1, key='pt_sun')
+            with c2_2: target_ot_sun = st.number_input("OT目標", min_value=0, value=5, step=1, key='ot_sun')
+            with c2_3: target_st_sun = st.number_input("ST目標", min_value=0, value=3, step=1, key='st_sun')
+
+        with sat_tab:
+            c2_1, c2_2, c2_3 = st.columns(3)
+            with c2_1: target_pt_sat = st.number_input("PT目標", min_value=0, value=4, step=1, key='pt_sat', disabled=not is_saturday_special)
+            with c2_2: target_ot_sat = st.number_input("OT目標", min_value=0, value=2, step=1, key='ot_sat', disabled=not is_saturday_special)
+            with c2_3: target_st_sat = st.number_input("ST目標", min_value=0, value=1, step=1, key='st_sat', disabled=not is_saturday_special)
     
     st.markdown("---")
     st.subheader(f"{year}年{month}月のイベント設定（各日の特別業務単位数を入力）")
@@ -506,8 +592,14 @@ if create_button:
         params['staff_df'] = staff_df
         params['requests_df'] = requests_df
         params['year'] = year; params['month'] = month
-        params['target_pt'] = target_pt; params['target_ot'] = target_ot; params['target_st'] = target_st
         params['tolerance'] = tolerance; params['event_units'] = event_units_input
+        
+        # 土日の目標人数と土曜の有効フラグを渡す
+        params['is_saturday_special'] = is_saturday_special
+        params['targets'] = {
+            'sun': {'pt': target_pt_sun, 'ot': target_ot_sun, 'st': target_st_sun},
+            'sat': {'pt': target_pt_sat, 'ot': target_ot_sat, 'st': target_st_sat}
+        }
         
         # 必須列の存在チェック
         required_staff_cols = ['職員番号', '職種', '1日の単位数']
