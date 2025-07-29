@@ -47,11 +47,30 @@ def _create_summary(schedule_df, staff_info_dict, year, month, event_units, all_
         daily_summary.append(day_info)
     
     summary_df = pd.DataFrame(daily_summary)
-    # 数値列を特定
-    numeric_cols = summary_df.select_dtypes(include=np.number).columns
-    # 不要な小数を丸めて、整数にできるものは整数にする
-    for col in numeric_cols:
-        summary_df[col] = summary_df[col].apply(lambda x: f'{int(x) if x == int(x) else x:.1f}'.rstrip('0').rstrip('.') if isinstance(x, (int, float)) else x)
+
+    # フォーマットを適用する列のリストを明示的に定義
+    cols_to_format = [
+        '出勤者総数', 'PT', 'OT', 'ST', '役職者', '回復期', '地域包括', '外来',
+        'PT単位数', 'OT単位数', 'ST単位数', 'PT+OT単位数', '特別業務単位数'
+    ]
+
+    def format_number(x):
+        if pd.isna(x):
+            return '-' # 元々'-'だった箇所
+        # 浮動小数点数の微小な誤差を丸める
+        x = round(x, 5) 
+        if x == int(x):
+            return str(int(x))
+        else:
+            # 末尾の不要な0を削除
+            return f'{x:.10f}'.rstrip('0').rstrip('.')
+
+    for col in cols_to_format:
+        if col in summary_df.columns:
+            # 数値に変換できないもの（'-'など）はNaNにする
+            numeric_series = pd.to_numeric(summary_df[col], errors='coerce')
+            # フォーマットを適用し、NaNだった箇所を元の'-'に戻す
+            summary_df[col] = numeric_series.apply(format_number)
 
     return summary_df
 
