@@ -123,6 +123,9 @@ def _create_schedule_df(shifts_values, staff, days, staff_df, requests_map):
     schedule_df.insert(2, '職種', schedule_df['職員番号'].map(staff_map['職種']))
     return schedule_df
 
+def update_penalty_setting(key):
+    st.session_state.penalty_settings[key] = st.session_state[key]
+
 def load_penalty_settings_from_gsheet(spreadsheet):
     try:
         worksheet = spreadsheet.worksheet("パラメータ設定")
