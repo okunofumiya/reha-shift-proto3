@@ -130,29 +130,54 @@ def solve_shift_model(params):
     for s in staff:
         for d in days: shifts[(s, d)] = model.NewBoolVar(f'shift_{s}_{d}')
 
+    penalties = []
+    h_penalty = 1000 # ハード制約違反のペナルティ
+
     if params['h1_on']:
-        # (h1のコードは変更なし)
-        for s in staff:
+        # H1: 月間休日数 (ソフト制約化)
+        for s_idx, s in enumerate(staff):
             s_reqs = requests_map.get(s, {})
             num_paid_leave = sum(1 for r in s_reqs.values() if r == '有')
             num_special_leave = sum(1 for r in s_reqs.values() if r == '特')
             num_summer_leave = sum(1 for r in s_reqs.values() if r == '夏')
             num_half_kokyu = sum(1 for r in s_reqs.values() if r in ['AM休', 'PM休'])
+            
             full_holidays_total = sum(1 - shifts[(s, d)] for d in days)
             full_holidays_kokyu = model.NewIntVar(0, num_days, f'full_kokyu_{s}')
             model.Add(full_holidays_kokyu == full_holidays_total - num_paid_leave - num_special_leave - num_summer_leave)
-            model.Add(2 * full_holidays_kokyu + num_half_kokyu == 18)
+            
+            # 休日数の合計値（半休は0.5日=1ポイント、全休は1日=2ポイントで計算）
+            total_holiday_value = model.NewIntVar(0, num_days * 2, f'total_holiday_value_{s}')
+            model.Add(total_holiday_value == 2 * full_holidays_kokyu + num_half_kokyu)
+            
+            # 目標の休日数(18)との差分を計算
+            deviation = model.NewIntVar(-num_days * 2, num_days * 2, f'h1_dev_{s}')
+            model.Add(deviation == total_holiday_value - 18)
+            
+            # 差分の絶対値を取り、ペナルティとして加算
+            abs_deviation = model.NewIntVar(0, num_days * 2, f'h1_abs_dev_{s}')
+            model.AddAbsEquality(abs_deviation, deviation)
+            penalties.append(h_penalty * abs_deviation)
 
     if params['h2_on']:
-        # (h2のコードは変更なし)
+        # H2: 希望休/有休 (ソフト制約化)
         for s, reqs in requests_map.items():
             for d, req_type in reqs.items():
-                if req_type in ['×', '有', '特', '夏']: model.Add(shifts[(s, d)] == 0)
-                elif req_type in ['○', 'AM有', 'PM有', 'AM休', 'PM休']: model.Add(shifts[(s, d)] == 1)
+                if req_type in ['×', '有', '特', '夏']:
+                    # 休み希望日に出勤(shifts=1)した場合にペナルティ
+                    penalties.append(h_penalty * shifts[(s, d)])
+                elif req_type in ['○', 'AM有', 'PM有', 'AM休', 'PM休']:
+                    # 出勤希望日に欠勤(shifts=0)した場合にペナルティ
+                    penalties.append(h_penalty * (1 - shifts[(s, d)]))
 
     if params['h3_on']:
-        # (h3のコードは変更なし)
-        for d in days: model.Add(sum(shifts[(s, d)] for s in managers) >= 1)
+        # H3: 役職者配置 (ソフト制約化)
+        for d in days:
+            # その日に役職者が誰も出勤しない(sum=0)場合にペナルティ
+            no_manager = model.NewBoolVar(f'no_manager_{d}')
+            model.Add(sum(shifts[(s, d)] for s in managers) == 0).OnlyEnforceIf(no_manager)
+            model.Add(sum(shifts[(s, d)] for s in managers) > 0).OnlyEnforceIf(no_manager.Not())
+            penalties.append(h_penalty * no_manager)
     
     ### 変更点 2: 古いH4とH5のルールを無効化 ###
     # H4はUIから削除しても良いが、ここではオフの場合の動作を記述
@@ -165,13 +190,18 @@ def solve_shift_model(params):
         st.warning("H5は廃止されました。「日曜上限」ルールに統合されています。")
         # 何もしない
 
-    ### 変更点 3: 新しい日曜上限のハード制約 ###
+    ### 変更点 3: 新しい日曜上限の制約 (ソフト制約化) ###
     for s in staff:
-        # 各職員の日曜出勤回数が、職員情報にある「日曜上限」を超えないようにする
         sunday_limit = int(staff_info[s]['日曜上限'])
-        model.Add(sum(shifts[(s, d)] for d in sundays) <= sunday_limit)
-
-    penalties = []
+        num_sundays_worked = sum(shifts[(s, d)] for d in sundays)
+        
+        # 上限を超えた出勤回数を計算
+        over_limit = model.NewIntVar(0, len(sundays), f'sunday_over_{s}')
+        model.Add(over_limit >= num_sundays_worked - sunday_limit)
+        model.Add(over_limit >= 0)
+        
+        # 上限を超えた回数に対してペナルティを課す
+        penalties.append(h_penalty * over_limit)
     
     ### 変更点 4: 2段階割り当てのための新しいソフト制約 ###
     # このペナルティの値は、他のペナルティより十分大きいが、必須ではない程度の値に設定
