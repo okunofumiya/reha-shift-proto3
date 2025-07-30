@@ -11,7 +11,7 @@ from gspread_dataframe import get_as_dataframe
 import json
 
 # ★★★ バージョン情報 ★★★
-APP_VERSION = "proto.2.3.1" # st.session_stateの改善版
+APP_VERSION = "proto.2.3.2" # UIの改善版
 APP_CREDIT = "Okuno with 🤖 Gemini and Claude"
 
 # --- Gspread ヘルパー関数 ---
@@ -70,7 +70,7 @@ def save_preset(worksheet, name, json_data):
 def gather_current_ui_settings():
     settings = {}
     keys_to_save = [
-        'tolerance', 'tri_penalty_weight', 'is_saturday_special',
+        'tolerance', 'is_saturday_special',
         'pt_sun', 'ot_sun', 'st_sun', 'pt_sat', 'ot_sat', 'st_sat',
         'h1', 'h1p', 'h2', 'h2p', 'h3', 'h3p', 'h5', 'h5p',
         'h_weekend_limit_penalty',
@@ -403,15 +403,10 @@ def solve_shift_model(params):
 st.set_page_config(layout="wide")
 st.title('リハビリテーション科 勤務表作成アプリ')
 
-# --- コールバック関数とセッションステートの初期化 ---
-def sync_s4_penalty():
-    """スライダーの値をS4ペナルティに同期する"""
-    st.session_state.s4p = st.session_state.tri_penalty_weight
-
-# UIで使うキーのデフォルト値を設定
+# --- セッションステートの初期化 ---
 def initialize_session_state():
     defaults = {
-        'tolerance': 1, 'tri_penalty_weight': 8, 'is_saturday_special': False,
+        'tolerance': 1, 'is_saturday_special': False,
         'pt_sun': 10, 'ot_sun': 5, 'st_sun': 3, 'pt_sat': 4, 'ot_sat': 2, 'st_sat': 1,
         'h1': True, 'h1p': 1000, 'h2': True, 'h2p': 1000, 'h3': True, 'h3p': 1000, 'h5': True, 'h5p': 1000,
         'h_weekend_limit_penalty': 1000,
@@ -423,9 +418,6 @@ def initialize_session_state():
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
-    # s4pはtri_penalty_weightに依存するので別途初期化
-    if 's4p' not in st.session_state:
-        st.session_state.s4p = st.session_state.tri_penalty_weight
 
 initialize_session_state()
 
@@ -492,9 +484,8 @@ with st.expander("▼ 各種パラメータを設定する", expanded=True):
         year = st.number_input("年（西暦）", min_value=default_year - 5, max_value=default_year + 5, value=default_year, label_visibility="collapsed")
         month = st.selectbox("月", options=list(range(1, 13)), index=default_month_index, label_visibility="collapsed")
         
-        st.subheader("緩和条件と優先度")
+        st.subheader("緩和条件")
         st.number_input("PT/OT許容誤差(±)", min_value=0, max_value=5, help="PT/OTの合計人数が目標通りなら、それぞれの人数がこの値までずれてもペナルティを課しません。", key='tolerance')
-        st.slider("準希望休(△)の優先度", min_value=0, max_value=20, help="値が大きいほど△希望が尊重されます。", key='tri_penalty_weight', on_change=sync_s4_penalty)
 
     with c2:
         st.subheader("週末の出勤人数設定")
