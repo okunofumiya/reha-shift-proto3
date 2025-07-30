@@ -209,7 +209,7 @@ def solve_shift_model(params):
 
     penalties = []
 
-    if params['h1_on']:
+    if params['h1']:
         for s_idx, s in enumerate(staff):
             if s in params['part_time_staff_ids']: continue
             s_reqs = requests_map.get(s, {})
@@ -232,7 +232,7 @@ def solve_shift_model(params):
             model.AddAbsEquality(abs_deviation, deviation)
             penalties.append(params['h1_penalty'] * abs_deviation)
 
-    if params['h2_on']:
+    if params['h2']:
         for s, reqs in requests_map.items():
             for d, req_type in reqs.items():
                 if s in params['part_time_staff_ids']:
@@ -242,14 +242,14 @@ def solve_shift_model(params):
                     if req_type in ['×', '有', '特', '夏']: penalties.append(params['h2_penalty'] * shifts[(s, d)])
                     elif req_type in ['○', 'AM有', 'PM有', 'AM休', 'PM休']: penalties.append(params['h2_penalty'] * (1 - shifts[(s, d)]))
 
-    if params['h3_on']:
+    if params['h3']:
         for d in days:
             no_manager = model.NewBoolVar(f'no_manager_{d}')
             model.Add(sum(shifts[(s, d)] for s in managers) == 0).OnlyEnforceIf(no_manager)
             model.Add(sum(shifts[(s, d)] for s in managers) > 0).OnlyEnforceIf(no_manager.Not())
             penalties.append(params['h3_penalty'] * no_manager)
     
-    if params.get('h5_on', False):
+    if params.get('h5', False):
         for s in staff:
             if s in params['part_time_staff_ids']: continue
             if pd.notna(staff_info[s].get('日曜上限')):
@@ -297,13 +297,13 @@ def solve_shift_model(params):
             model.Add(over_two_sundays >= 0)
             penalties.append(sunday_overwork_penalty * over_two_sundays)
     
-    if params['s4_on']:
+    if params['s4']:
         for s, reqs in requests_map.items():
             for d, req_type in reqs.items():
                 if req_type == '△':
                     penalties.append(params['s4_penalty'] * shifts[(s, d)])
 
-    if params['s0_on'] or params['s2_on']:
+    if params['s0'] or params['s2']:
         weeks_in_month = []; current_week = []
         for d in days:
             current_week.append(d)
@@ -323,12 +323,12 @@ def solve_shift_model(params):
                 total_holiday_value = model.NewIntVar(0, 28, f'thv_s{s_idx}_w{w_idx}')
                 model.Add(total_holiday_value == 2 * num_full_holidays_in_week + num_half_holidays_in_week)
 
-                if len(week) == 7 and params['s0_on']:
+                if len(week) == 7 and params['s0']:
                     violation = model.NewBoolVar(f'f_w_v_s{s_idx}_w{w_idx}'); model.Add(total_holiday_value < 3).OnlyEnforceIf(violation); model.Add(total_holiday_value >= 3).OnlyEnforceIf(violation.Not()); penalties.append(params['s0_penalty'] * violation)
-                elif len(week) < 7 and params['s2_on']:
+                elif len(week) < 7 and params['s2']:
                     violation = model.NewBoolVar(f'p_w_v_s{s_idx}_w{w_idx}'); model.Add(total_holiday_value < 1).OnlyEnforceIf(violation); model.Add(total_holiday_value >= 1).OnlyEnforceIf(violation.Not()); penalties.append(params['s2_penalty'] * violation)
     
-    if any([params['s1a_on'], params['s1b_on'], params['s1c_on']]):
+    if any([params['s1a'], params['s1b'], params['s1c']]):
         special_days_map = {'sun': sundays}
         if special_saturdays: special_days_map['sat'] = special_saturdays
 
@@ -336,23 +336,23 @@ def solve_shift_model(params):
             target_pt = params['targets'][day_type]['pt']; target_ot = params['targets'][day_type]['ot']; target_st = params['targets'][day_type]['st']
             for d in special_days:
                 pt_on_day = sum(shifts[(s, d)] for s in pt_staff); ot_on_day = sum(shifts[(s, d)] for s in ot_staff); st_on_day = sum(shifts[(s, d)] for s in st_staff)
-                if params['s1a_on']:
+                if params['s1a']:
                     total_pt_ot = pt_on_day + ot_on_day; total_diff = model.NewIntVar(-50, 50, f't_d_{day_type}_{d}'); model.Add(total_diff == total_pt_ot - (target_pt + target_ot)); abs_total_diff = model.NewIntVar(0, 50, f'a_t_d_{day_type}_{d}'); model.AddAbsEquality(abs_total_diff, total_diff); penalties.append(params['s1a_penalty'] * abs_total_diff)
-                if params['s1b_on']:
+                if params['s1b']:
                     pt_diff = model.NewIntVar(-30, 30, f'p_d_{day_type}_{d}'); model.Add(pt_diff == pt_on_day - target_pt); pt_penalty = model.NewIntVar(0, 30, f'p_p_{day_type}_{d}'); model.Add(pt_penalty >= pt_diff - params['tolerance']); model.Add(pt_penalty >= -pt_diff - params['tolerance']); penalties.append(params['s1b_penalty'] * pt_penalty)
                     ot_diff = model.NewIntVar(-30, 30, f'o_d_{day_type}_{d}'); model.Add(ot_diff == ot_on_day - target_ot); ot_penalty = model.NewIntVar(0, 30, f'o_p_{day_type}_{d}'); model.Add(ot_penalty >= ot_diff - params['tolerance']); model.Add(ot_penalty >= -ot_diff - params['tolerance']); penalties.append(params['s1b_penalty'] * ot_penalty)
-                if params['s1c_on']:
+                if params['s1c']:
                     st_diff = model.NewIntVar(-10, 10, f's_d_{day_type}_{d}'); model.Add(st_diff == st_on_day - target_st); abs_st_diff = model.NewIntVar(0, 10, f'a_s_d_{day_type}_{d}'); model.AddAbsEquality(abs_st_diff, st_diff); penalties.append(params['s1c_penalty'] * abs_st_diff)
-    if params['s3_on']:
+    if params['s3']:
         for d in days:
             num_gairai_off = sum(1 - shifts[(s, d)] for s in gairai_staff); penalty = model.NewIntVar(0, len(gairai_staff), f'g_p_{d}'); model.Add(penalty >= num_gairai_off - 1); penalties.append(params['s3_penalty'] * penalty)
-    if params['s5_on']:
+    if params['s5']:
         for d in days:
             kaifukuki_pt_on = sum(shifts[(s, d)] for s in kaifukuki_pt); kaifukuki_ot_on = sum(shifts[(s, d)] for s in kaifukuki_ot)
             model.Add(kaifukuki_pt_on + kaifukuki_ot_on >= 1)
             pt_present = model.NewBoolVar(f'k_p_p_{d}'); ot_present = model.NewBoolVar(f'k_o_p_{d}'); model.Add(kaifukuki_pt_on >= 1).OnlyEnforceIf(pt_present); model.Add(kaifukuki_pt_on == 0).OnlyEnforceIf(pt_present.Not()); model.Add(kaifukuki_ot_on >= 1).OnlyEnforceIf(ot_present); model.Add(kaifukuki_ot_on == 0).OnlyEnforceIf(ot_present.Not()); penalties.append(params['s5_penalty'] * (1 - pt_present)); penalties.append(params['s5_penalty'] * (1 - ot_present))
     
-    if params['s6_on']:
+    if params['s6']:
         unit_penalty_weight = params.get('s6_penalty_heavy', 4) if params.get('high_flat_penalty') else params.get('s6_penalty', 2)
         event_units = params['event_units']
         all_half_day_requests = {s: {d for d, r in reqs.items() if r in ['AM有', 'PM有', 'AM休', 'PM休']} for s, reqs in requests_map.items()}
@@ -623,7 +623,6 @@ if create_button:
 
         # st.session_stateからパラメータを収集
         params = {key: st.session_state[key] for key in gather_current_ui_settings() if key in st.session_state}
-        params['h4_on'] = False # 廃止されたルール
 
         params['staff_df'] = staff_df
         params['requests_df'] = requests_df
