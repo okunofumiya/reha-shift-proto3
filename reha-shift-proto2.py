@@ -11,7 +11,7 @@ from gspread_dataframe import get_as_dataframe
 import json
 
 # ★★★ バージョン情報 ★★★
-APP_VERSION = "proto.2.3.2" # UIの改善版
+APP_VERSION = "proto.2.3.3" # UIの改善版2
 APP_CREDIT = "Okuno with 🤖 Gemini and Claude"
 
 # --- Gspread ヘルパー関数 ---
@@ -484,12 +484,9 @@ with st.expander("▼ 各種パラメータを設定する", expanded=True):
         year = st.number_input("年（西暦）", min_value=default_year - 5, max_value=default_year + 5, value=default_year, label_visibility="collapsed")
         month = st.selectbox("月", options=list(range(1, 13)), index=default_month_index, label_visibility="collapsed")
         
-        st.subheader("緩和条件")
-        st.number_input("PT/OT許容誤差(±)", min_value=0, max_value=5, help="PT/OTの合計人数が目標通りなら、それぞれの人数がこの値までずれてもペナルティを課しません。", key='tolerance')
-
     with c2:
         st.subheader("週末の出勤人数設定")
-        is_saturday_special = st.toggle("土曜日の人数調整を有効にする", help="ONにすると、土曜日を特別日として扱い、下の目標人数に基づいて出勤者を調整します。", key='is_saturday_special')
+        st.toggle("土曜日の人数調整を有効にする", help="ONにすると、土曜日を特別日として扱い、下の目標人数に基づいて出勤者を調整します。", key='is_saturday_special')
 
         sun_tab, sat_tab = st.tabs(["日曜日の目標人数", "土曜日の目標人数"])
 
@@ -504,7 +501,10 @@ with st.expander("▼ 各種パラメータを設定する", expanded=True):
             with c2_1: st.number_input("PT目標", min_value=0, step=1, key='pt_sat', disabled=not st.session_state.is_saturday_special)
             with c2_2: st.number_input("OT目標", min_value=0, step=1, key='ot_sat', disabled=not st.session_state.is_saturday_special)
             with c2_3: st.number_input("ST目標", min_value=0, step=1, key='st_sat', disabled=not st.session_state.is_saturday_special)
-    
+        
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.number_input("PT/OT許容誤差(±)", min_value=0, max_value=5, help="週末のPT/OT個別人数(S1-b)が目標からこの値までずれてもペナルティを課しません。", key='tolerance')
+
     st.markdown("---")
     st.subheader(f"{year}年{month}月のイベント設定（各日の特別業務単位数を入力）")
     st.info("「全体」タブは職種を問わない業務、「PT/OT/ST」タブは各職種固有の業務を入力します。「全体」に入力された業務は、各職種の標準的な業務量比で自動的に按分されます。")
