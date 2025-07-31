@@ -556,12 +556,8 @@ def solve_shift_model(params):
                             })
                         # S2: 不完全週
                         elif len(week) < 7 and params['s2_on'] and total_holiday_value < 1:
-                             penalty_details.append({
-                                'rule': 'S2: 週休未確保（不完全週）',
-                                'staff': staff_info[s]['職員名'],
-                                'day': '-',
-                                'detail': f"第{w_idx+1}週 ({week_str}) の休日が{total_holiday_value/2}日分しか確保できていません（目標: 0.5日分）。"
-                            })
+                             # 最終週のS2違反はソルバーの努力目標とし、ペナルティとしては表示しない
+                             pass
 
         # S5: 回復期担当者
         if params['s5_on']:
