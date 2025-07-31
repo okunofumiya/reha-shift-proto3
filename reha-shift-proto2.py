@@ -477,9 +477,8 @@ with st.expander("▼ 各種パラメータを設定する", expanded=True):
         year = st.number_input("年（西暦）", min_value=default_year - 5, max_value=default_year + 5, value=default_year, label_visibility="collapsed")
         month = st.selectbox("月", options=list(range(1, 13)), index=default_month_index, label_visibility="collapsed")
         
-        st.subheader("緩和条件と優先度")
+        st.subheader("緩和条件")
         tolerance = st.number_input("PT/OT許容誤差(±)", min_value=0, max_value=5, value=st.session_state.get('tolerance', 1), help="PT/OTの合計人数が目標通りなら、それぞれの人数がこの値までずれてもペナルティを課しません。", key='tolerance')
-        tri_penalty_weight = st.slider("準希望休(△)の優先度", min_value=0, max_value=20, value=st.session_state.get('tri_penalty_weight', 8), help="値が大きいほど△希望が尊重されます。", key='tri_penalty_weight')
 
     with c2:
         st.subheader("週末の出勤人数設定")
@@ -570,7 +569,7 @@ with st.expander("▼ ルール検証モード（上級者向け）"):
         params_ui['s3_penalty'] = st.number_input("S3 Penalty", value=st.session_state.get('s3p', 10), disabled=not params_ui['s3_on'], key='s3p')
     with s_cols[3]:
         params_ui['s4_on'] = st.toggle('S4: 準希望休(△)尊重', value=st.session_state.get('s4', True), key='s4')
-        params_ui['s4_penalty'] = st.number_input("S4 Penalty", value=st.session_state.get('s4p', tri_penalty_weight), disabled=not params_ui['s4_on'], key='s4p')
+        params_ui['s4_penalty'] = st.number_input("S4 Penalty", value=st.session_state.get('s4p', 8), help="値が大きいほど△希望が尊重されます。", disabled=not params_ui['s4_on'], key='s4p')
     s_cols2 = st.columns(4)
     with s_cols2[0]:
         params_ui['s5_on'] = st.toggle('S5: 回復期配置', value=st.session_state.get('s5', True), key='s5')
