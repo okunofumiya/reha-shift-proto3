@@ -219,6 +219,7 @@ def solve_shift_model(params):
         for d in days: shifts[(s, d)] = model.NewBoolVar(f'shift_{s}_{d}')
 
     penalties = []
+    penalty_details = [] # ペナルティ詳細を記録するリスト
 
     if params['h1_on']:
         for s_idx, s in enumerate(staff):
@@ -401,14 +402,131 @@ def solve_shift_model(params):
     
     if status == cp_model.OPTIMAL or status == cp_model.FEASIBLE:
         shifts_values = {(s, d): solver.Value(shifts[(s, d)]) for s in staff for d in days}
+        # --- ペナルティ詳細の収集 ---
+        # H1: 月間休日数
+        if params['h1_on']:
+            for s in staff:
+                if s in params['part_time_staff_ids']: continue
+                num_paid_leave = sum(1 for r in requests_map.get(s, {}).values() if r == '有')
+                num_special_leave = sum(1 for r in requests_map.get(s, {}).values() if r == '特')
+                num_summer_leave = sum(1 for r in requests_map.get(s, {}).values() if r == '夏')
+                num_half_kokyu = sum(1 for r in requests_map.get(s, {}).values() if r in ['AM休', 'PM休'])
+                full_holidays_total = sum(1 - shifts_values.get((s, d), 0) for d in days)
+                full_holidays_kokyu = full_holidays_total - num_paid_leave - num_special_leave - num_summer_leave
+                total_holiday_value = 2 * full_holidays_kokyu + num_half_kokyu
+                if total_holiday_value != 18:
+                    penalty_details.append({
+                        'rule': 'H1: 月間休日数',
+                        'staff': staff_info[s]['職員名'],
+                        'day': '-',
+                        'detail': f"休日が{total_holiday_value / 2}日分しか確保できませんでした（目標: 9日分）。"
+                    })
+
+        # H2: 希望休/有休
+        if params['h2_on']:
+            for s, reqs in requests_map.items():
+                for d, req_type in reqs.items():
+                    is_working = shifts_values.get((s, d), 0) == 1
+                    # 希望が休み（×, 有, 特, 夏）なのに出勤になっている
+                    if req_type in ['×', '有', '特', '夏'] and is_working:
+                        penalty_details.append({
+                            'rule': 'H2: 希望休違反',
+                            'staff': staff_info[s]['職員名'],
+                            'day': d,
+                            'detail': f"{d}日の「{req_type}」希望に反して出勤になっています。"
+                        })
+                    # 希望が出勤（○, AM/PM有, AM/PM休）なのに休みになっている
+                    elif req_type in ['○', 'AM有', 'PM有', 'AM休', 'PM休'] and not is_working:
+                         penalty_details.append({
+                            'rule': 'H2: 希望休違反',
+                            'staff': staff_info[s]['職員名'],
+                            'day': d,
+                            'detail': f"{d}日の「{req_type}」希望に反して休みになっています。"
+                        })
+        
+        # H3: 役職者配置
+        if params['h3_on']:
+            for d in days:
+                managers_on_day = sum(shifts_values.get((s, d), 0) for s in managers)
+                if managers_on_day == 0:
+                    penalty_details.append({
+                        'rule': 'H3: 役職者未配置',
+                        'staff': '-',
+                        'day': d,
+                        'detail': f"{d}日に役職者が出勤していません。"
+                    })
+
+        # H5: 日曜出勤上限
+        if params.get('h5_on', False):
+            for s in staff:
+                if s in params['part_time_staff_ids']: continue
+                if pd.notna(staff_info[s].get('日曜上限')):
+                    sunday_limit = int(staff_info[s]['日曜上限'])
+                    num_sundays_worked = sum(shifts_values.get((s, d), 0) for d in sundays)
+                    if num_sundays_worked > sunday_limit:
+                        penalty_details.append({
+                            'rule': 'H5: 日曜出勤上限超過',
+                            'staff': staff_info[s]['職員名'],
+                            'day': '-',
+                            'detail': f"日曜日の出勤が{num_sundays_worked}回となり、上限（{sunday_limit}回）を超えています。"
+                        })
+
+        # S0/S2: 週休確保
+        if params['s0_on'] or params['s2_on']:
+            for s_idx, s in enumerate(staff):
+                if s in params['part_time_staff_ids']: continue
+                s_reqs = requests_map.get(s, {})
+                all_half_day_requests_staff = {d for d, r in s_reqs.items() if r in ['AM有', 'PM有', 'AM休', 'PM休']}
+                for w_idx, week in enumerate(params['weeks_in_month']):
+                    num_full_holidays_in_week = sum(1 - shifts_values.get((s, d), 0) for d in week)
+                    num_half_holidays_in_week = sum(1 for d in week if d in all_half_day_requests_staff and shifts_values.get((s,d),0) == 1)
+                    total_holiday_value = 2 * num_full_holidays_in_week + num_half_holidays_in_week
+                    week_str = f"{week[0]}日～{week[-1]}日"
+                    # S0: 完全週
+                    if len(week) == 7 and params['s0_on'] and total_holiday_value < 3:
+                        penalty_details.append({
+                            'rule': 'S0: 週休未確保（完全週）',
+                            'staff': staff_info[s]['職員名'],
+                            'day': '-',
+                            'detail': f"第{w_idx+1}週 ({week_str}) の休日が{total_holiday_value/2}日分しか確保できていません（目標: 1.5日分）。"
+                        })
+                    # S2: 不完全週
+                    elif len(week) < 7 and params['s2_on'] and total_holiday_value < 1:
+                         penalty_details.append({
+                            'rule': 'S2: 週休未確保（不完全週）',
+                            'staff': staff_info[s]['職員名'],
+                            'day': '-',
+                            'detail': f"第{w_idx+1}週 ({week_str}) の休日が{total_holiday_value/2}日分しか確保できていません（目標: 0.5日分）。"
+                        })
+
+        # S5: 回復期担当者
+        if params['s5_on']:
+            for d in days:
+                kaifukuki_pt_on = sum(shifts_values.get((s, d), 0) for s in kaifukuki_pt)
+                kaifukuki_ot_on = sum(shifts_values.get((s, d), 0) for s in kaifukuki_ot)
+                if kaifukuki_pt_on == 0:
+                    penalty_details.append({
+                        'rule': 'S5: 回復期担当未配置',
+                        'staff': '-',
+                        'day': d,
+                        'detail': f"{d}日に回復期担当のPTが出勤していません。"
+                    })
+                if kaifukuki_ot_on == 0:
+                    penalty_details.append({
+                        'rule': 'S5: 回復期担当未配置',
+                        'staff': '-',
+                        'day': d,
+                        'detail': f"{d}日に回復期担当のOTが出勤していません。"
+                    })
+
         all_half_day_requests = {s: {d for d, r in reqs.items() if r in ['AM有', 'PM有', 'AM休', 'PM休']} for s, reqs in requests_map.items()}
         schedule_df = _create_schedule_df(shifts_values, staff, days, params['staff_df'], requests_map)
         summary_df = _create_summary(schedule_df, staff_info, year, month, params['event_units'], all_half_day_requests)
         message = f"求解ステータス: **{solver.StatusName(status)}** (ペナルティ合計: **{round(solver.ObjectiveValue())}**)"
-        return True, schedule_df, summary_df, message, all_half_day_requests
+        return True, schedule_df, summary_df, message, all_half_day_requests, penalty_details
     else:
         message = f"致命的なエラー: ハード制約が矛盾しているため、勤務表を作成できませんでした。({solver.StatusName(status)})"
-        return False, pd.DataFrame(), pd.DataFrame(), message, None
+        return False, pd.DataFrame(), pd.DataFrame(), message, None, []
 
 # --- Streamlit UI ---
 st.set_page_config(layout="wide")
@@ -642,7 +760,7 @@ if create_button:
             params['staff_df']['職員名'] = params['staff_df']['職種'] + " " + params['staff_df']['職員番号'].astype(str)
             st.info("職員一覧に「職員名」列がなかったため、仮の職員名を生成しました。")
         
-        is_feasible, schedule_df, summary_df, message, all_half_day_requests = solve_shift_model(params)
+        is_feasible, schedule_df, summary_df, message, all_half_day_requests, penalty_details = solve_shift_model(params)
         
         st.info(message)
         if is_feasible:
@@ -661,11 +779,61 @@ if create_button:
             weekdays_header = [ ['月','火','水','木','金','土','日'][calendar.weekday(year, month, d)] for d in days_header]
             final_df_for_display.columns = pd.MultiIndex.from_tuples([('職員情報', '職員番号'), ('職員情報', '職員名'), ('職員情報', '職種')] + list(zip(days_header, weekdays_header)))
             
-            def style_table(df):
-                sunday_cols = [col for col in df.columns if col[1] == '日']
-                styler = df.style.set_properties(**{'text-align': 'center'})
-                for col in sunday_cols: styler = styler.set_properties(subset=[col], **{'background-color': '#fff0f0'})
-                return styler
+            # --- ペナルティのハイライトと詳細表示 ---
+            styler = final_df_for_display.style.set_properties(**{'text-align': 'center'})
+
+            # 日曜・土曜の背景色
+            sunday_cols = [col for col in final_df_for_display.columns if col[1] == '日']
+            saturday_cols = [col for col in final_df_for_display.columns if col[1] == '土']
+            for col in sunday_cols: styler = styler.set_properties(subset=[col], **{'background-color': '#fff0f0'})
+            for col in saturday_cols: styler = styler.set_properties(subset=[col], **{'background-color': '#f0f8ff'})
+
+            if penalty_details:
+                # アプローチ2: 表のハイライト
+                def highlight_penalties(data):
+                    df = data.copy()
+                    df.loc[:,:] = '' # デフォルトはスタイルなし
+
+                    for p in penalty_details:
+                        day_col_tuple = None
+                        if p['day'] != '-':
+                            day_col = int(p['day'])
+                            weekday_str = weekdays_header[day_col - 1]
+                            day_col_tuple = (day_col, weekday_str)
+
+                        # H2, H5, S0/S2 (職員単位のペナルティ)
+                        if p['staff'] != '-':
+                            staff_rows = data[data[('職員情報', '職員名')] == p['staff']].index
+                            if not staff_rows.empty:
+                                row_idx = staff_rows[0]
+                                # 日付が特定されている場合 (H2)
+                                if day_col_tuple and day_col_tuple in df.columns:
+                                    df.loc[row_idx, day_col_tuple] = 'background-color: #ffcccc'
+                                # 職員全体にかかるペナルティ (H1, H5, S0/S2)
+                                else:
+                                    df.loc[row_idx, ('職員情報', '職員名')] = 'background-color: #ffcccc'
+                        
+                        # H3, S5 (日付単位のペナルティ)
+                        elif day_col_tuple and day_col_tuple in df.columns:
+                             summary_rows = data[data[('職員情報', '職種')] == 'サマリー'].index
+                             if not summary_rows.empty:
+                                row_idx = summary_rows[0]
+                                if p['rule'] == 'H3: 役職者未配置':
+                                     df.loc[row_idx, day_col_tuple] = 'background-color: #ffcccc' # 役職者行をハイライト
+                                elif p['rule'] == 'S5: 回復期担当未配置':
+                                     df.loc[row_idx, day_col_tuple] = 'background-color: #ffcccc' # 回復期行をハイライト
+
+                    return df
+                
+                styler = styler.apply(highlight_penalties, axis=None)
+
+            st.dataframe(styler)
+
+            # アプローチ1: 詳細リスト
+            if penalty_details:
+                with st.expander("⚠️ ペナルティ詳細", expanded=True):
+                    for p in penalty_details:
+                        st.warning(f"**[{p['rule']}]** 職員: {p['staff']} | 日付: {p['day']} | 詳細: {p['detail']}")
             
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -673,7 +841,6 @@ if create_button:
                 summary_df.to_excel(writer, sheet_name='日別サマリー', index=False)
             excel_data = output.getvalue()
             st.download_button(label="📥 Excelでダウンロード", data=excel_data, file_name=f"schedule_{year}{month:02d}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-            st.dataframe(style_table(final_df_for_display))
             
     except Exception as e:
         st.error(f'予期せぬエラーが発生しました: {e}')
