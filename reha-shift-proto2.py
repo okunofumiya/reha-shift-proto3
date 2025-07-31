@@ -655,6 +655,15 @@ with st.expander("▼ 各種パラメータを設定する", expanded=True):
         year = st.number_input("年（西暦）", min_value=default_year - 5, max_value=default_year + 5, value=default_year, label_visibility="collapsed")
         month = st.selectbox("月", options=list(range(1, 13)), index=default_month_index, label_visibility="collapsed")
         
+        # --- 月またぎ週の案内 ---
+        prev_month_date = datetime(year, month, 1) - relativedelta(days=1)
+        if prev_month_date.weekday() != 5: # 5: Saturday
+            st.info(f"""ℹ️ **月またぎ週の休日調整が有効です**
+
+{year}年{month}月の第1週は前月から続いています。公平な休日確保のため、スプレッドシート「希望休一覧」の **`前月最終週の休日数`** 列に、各職員の前月の最終週（{prev_month_date.month}月）の休日数を入力してください。
+
+この値は、前月に作成された勤務表の「最終週休日数」列から転記できます。""")
+
     with c2:
         st.subheader("週末の出勤人数設定")
         is_saturday_special = st.toggle("土曜日の人数調整を有効にする", value=st.session_state.get('is_saturday_special', False), help="ONにすると、土曜日を特別日として扱い、下の目標人数に基づいて出勤者を調整します。", key='is_saturday_special')
@@ -704,15 +713,6 @@ with st.expander("▼ 各種パラメータを設定する", expanded=True):
                 if day_counter > num_days_in_month: break
 
     st.markdown("---")
-
-    # --- 月またぎ週の案内 ---
-    prev_month_date = datetime(year, month, 1) - relativedelta(days=1)
-    if prev_month_date.weekday() != 5: # 5: Saturday
-        st.info(f"ℹ️ **月またぎ週の休日調整が有効です**\n\n" 
-                f"{year}年{month}月の第1週は前月から続いています。公平な休日確保のため、スプレッドシート「希望休一覧」の **`前月最終週の休日数`** 列に、各職員の前月の最終週（{prev_month_date.month}月）の休日数を入力してください。\n\n" 
-                f"この値は、前月に作成された勤務表の「最終週休日数」列から転記できます。")
-
-    create_button = st.button('勤務表を作成', type="primary", use_container_width=True)
 
 with st.expander("▼ ルール検証モード（上級者向け）"):
     st.warning("注意: 各ルールのON/OFFやペナルティ値を変更することで、意図しない結果や、解が見つからない状況が発生する可能性があります。")
@@ -780,6 +780,8 @@ with st.expander("▼ ルール検証モード（上級者向け）"):
     with s_cols3[2]:
         params_ui['s1c_on'] = st.toggle('S1-c: ST目標', value=st.session_state.get('s1c', True), key='s1c')
         params_ui['s1c_penalty'] = st.number_input("S1-c Penalty", value=st.session_state.get('s1cp', 60), disabled=not params_ui['s1c_on'], key='s1cp')
+
+create_button = st.button('勤務表を作成', type="primary", use_container_width=True)
 
 if create_button:
     if 'confirm_overwrite' in st.session_state and st.session_state.confirm_overwrite:
