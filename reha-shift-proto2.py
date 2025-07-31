@@ -167,27 +167,27 @@ def _create_schedule_df(shifts_values, staff, days, staff_df, requests_map, year
         schedule_data[s] = row
     schedule_df = pd.DataFrame.from_dict(schedule_data, orient='index', columns=days)
 
-    # --- 最終週の休日数を計算 ---
+    # --- 最終週の休日数を計算 (修正済み) ---
     num_days = calendar.monthrange(year, month)[1]
+    # calendar.weekday() は 月曜=0, 日曜=6。週の始まりを日曜日に統一。
     last_day_weekday = calendar.weekday(year, month, num_days)
-    final_week_start_day = num_days - last_day_weekday -1 # 週の始まりを日曜日に
-    final_week_days = [d for d in days if d > final_week_start_day]
+    start_of_last_week = num_days - ((last_day_weekday + 1) % 7)
+    final_week_days = [d for d in days if d >= start_of_last_week]
 
     last_week_holidays = {}
     for s in staff:
         holidays = 0
         s_requests = requests_map.get(s, {})
         for d in final_week_days:
-            # ソルバーが割り当てた休日
-            if shifts_values.get((s, d), 0) == 0 and d not in s_requests:
+            req = s_requests.get(d)
+            is_working = shifts_values.get((s, d), 0) == 1
+
+            if not is_working:
+                # フルで休みの場合 (記号: -, ×, 有, 特, 夏, △) は1日加算
                 holidays += 1
-            # 希望休など
-            elif d in s_requests:
-                req = s_requests[d]
-                if req in ['×', '有', '特', '夏']:
-                    holidays += 1
-                elif req in ['AM休', 'PM休']:
-                    holidays += 0.5
+            elif req in ['AM休', 'PM休', 'AM有', 'PM有']:
+                # 半日休みの場合 (AM/PM休, AM/PM有) は0.5日加算
+                holidays += 0.5
         last_week_holidays[s] = holidays
     
     schedule_df['最終週休日数'] = schedule_df.index.map(last_week_holidays)
