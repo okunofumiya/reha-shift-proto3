@@ -532,22 +532,36 @@ def solve_shift_model(params):
                     num_half_holidays_in_week = sum(1 for d in week if d in all_half_day_requests_staff and shifts_values.get((s,d),0) == 1)
                     total_holiday_value = 2 * num_full_holidays_in_week + num_half_holidays_in_week
                     week_str = f"{week[0]}日～{week[-1]}日"
-                    # S0: 完全週
-                    if len(week) == 7 and params['s0_on'] and total_holiday_value < 3:
-                        penalty_details.append({
-                            'rule': 'S0: 週休未確保（完全週）',
-                            'staff': staff_info[s]['職員名'],
-                            'day': '-',
-                            'detail': f"第{w_idx+1}週 ({week_str}) の休日が{total_holiday_value/2}日分しか確保できていません（目標: 1.5日分）。"
-                        })
-                    # S2: 不完全週
-                    elif len(week) < 7 and params['s2_on'] and total_holiday_value < 1:
-                         penalty_details.append({
-                            'rule': 'S2: 週休未確保（不完全週）',
-                            'staff': staff_info[s]['職員名'],
-                            'day': '-',
-                            'detail': f"第{w_idx+1}週 ({week_str}) の休日が{total_holiday_value/2}日分しか確保できていません（目標: 0.5日分）。"
-                        })
+
+                    # 月またぎ週の考慮 (第1週のみ)
+                    if is_cross_month_week and w_idx == 0:
+                        prev_week_holidays = staff_info[s].get('前月最終週の休日数', 0) * 2
+                        cross_month_total_value = total_holiday_value + int(prev_week_holidays)
+                        if cross_month_total_value < 3:
+                            penalty_details.append({
+                                'rule': 'S0: 週休未確保（月またぎ週）',
+                                'staff': staff_info[s]['職員名'],
+                                'day': '-',
+                                'detail': f"前月最終週と今月第1週 ({week_str}) を合わせた休日が{cross_month_total_value/2}日分しか確保できていません（目標: 1.5日分）。"
+                            })
+                    # 通常の週
+                    else:
+                        # S0: 完全週
+                        if len(week) == 7 and params['s0_on'] and total_holiday_value < 3:
+                            penalty_details.append({
+                                'rule': 'S0: 週休未確保（完全週）',
+                                'staff': staff_info[s]['職員名'],
+                                'day': '-',
+                                'detail': f"第{w_idx+1}週 ({week_str}) の休日が{total_holiday_value/2}日分しか確保できていません（目標: 1.5日分）。"
+                            })
+                        # S2: 不完全週
+                        elif len(week) < 7 and params['s2_on'] and total_holiday_value < 1:
+                             penalty_details.append({
+                                'rule': 'S2: 週休未確保（不完全週）',
+                                'staff': staff_info[s]['職員名'],
+                                'day': '-',
+                                'detail': f"第{w_idx+1}週 ({week_str}) の休日が{total_holiday_value/2}日分しか確保できていません（目標: 0.5日分）。"
+                            })
 
         # S5: 回復期担当者
         if params['s5_on']:
