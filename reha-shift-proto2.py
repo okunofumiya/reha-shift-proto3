@@ -146,7 +146,7 @@ def _create_summary(schedule_df, staff_info_dict, year, month, event_units, all_
 
     return summary_df
 
-def _create_schedule_df(shifts_values, staff, days, staff_df, requests_map):
+def _create_schedule_df(shifts_values, staff, days, staff_df, requests_map, year, month):
     schedule_data = {}
     for s in staff:
         row = []; s_requests = requests_map.get(s, {})
@@ -166,6 +166,32 @@ def _create_schedule_df(shifts_values, staff, days, staff_df, requests_map):
                 else: row.append('')
         schedule_data[s] = row
     schedule_df = pd.DataFrame.from_dict(schedule_data, orient='index', columns=days)
+
+    # --- 最終週の休日数を計算 ---
+    num_days = calendar.monthrange(year, month)[1]
+    last_day_weekday = calendar.weekday(year, month, num_days)
+    final_week_start_day = num_days - last_day_weekday -1 # 週の始まりを日曜日に
+    final_week_days = [d for d in days if d > final_week_start_day]
+
+    last_week_holidays = {}
+    for s in staff:
+        holidays = 0
+        s_requests = requests_map.get(s, {})
+        for d in final_week_days:
+            # ソルバーが割り当てた休日
+            if shifts_values.get((s, d), 0) == 0 and d not in s_requests:
+                holidays += 1
+            # 希望休など
+            elif d in s_requests:
+                req = s_requests[d]
+                if req in ['×', '有', '特', '夏']:
+                    holidays += 1
+                elif req in ['AM休', 'PM休']:
+                    holidays += 0.5
+        last_week_holidays[s] = holidays
+    
+    schedule_df['最終週休日数'] = schedule_df.index.map(last_week_holidays)
+
     schedule_df = schedule_df.reset_index().rename(columns={'index': '職員番号'})
     staff_map = staff_df.set_index('職員番号')
     schedule_df.insert(1, '職員名', schedule_df['職員番号'].map(staff_map['職員名']))
@@ -213,6 +239,21 @@ def solve_shift_model(params):
                  requests_map[staff_id][d] = row[col_name]
 
     params['requests_map'] = requests_map
+
+    # --- 月またぎ週の判定 ---
+    prev_month_date = datetime(year, month, 1) - relativedelta(days=1)
+    is_cross_month_week = prev_month_date.weekday() != 5 # 5: Saturday
+
+    # --- 前月最終週の休日数をスタッフ情報にマージ ---
+    if is_cross_month_week and '前月最終週の休日数' in params['requests_df'].columns:
+        staff_df_merged = params['staff_df'].merge(params['requests_df'][['職員番号', '前月最終週の休日数']], on='職員番号', how='left')
+        staff_df_merged['前月最終週の休日数'].fillna(0, inplace=True)
+        params['staff_info'] = staff_df_merged.set_index('職員番号').to_dict('index')
+        staff_info = params['staff_info']
+    else:
+        # マージしない場合も、キーが存在するようにデフォルト値0を設定
+        for s_info in staff_info.values():
+            s_info['前月最終週の休日数'] = 0
 
     model = cp_model.CpModel(); shifts = {}
     for s in staff:
@@ -335,10 +376,19 @@ def solve_shift_model(params):
                 total_holiday_value = model.NewIntVar(0, 28, f'thv_s{s_idx}_w{w_idx}')
                 model.Add(total_holiday_value == 2 * num_full_holidays_in_week + num_half_holidays_in_week)
 
-                if len(week) == 7 and params['s0_on']:
-                    violation = model.NewBoolVar(f'f_w_v_s{s_idx}_w{w_idx}'); model.Add(total_holiday_value < 3).OnlyEnforceIf(violation); model.Add(total_holiday_value >= 3).OnlyEnforceIf(violation.Not()); penalties.append(params['s0_penalty'] * violation)
-                elif len(week) < 7 and params['s2_on']:
-                    violation = model.NewBoolVar(f'p_w_v_s{s_idx}_w{w_idx}'); model.Add(total_holiday_value < 1).OnlyEnforceIf(violation); model.Add(total_holiday_value >= 1).OnlyEnforceIf(violation.Not()); penalties.append(params['s2_penalty'] * violation)
+                # 月またぎ週の考慮 (第1週のみ)
+                if is_cross_month_week and w_idx == 0:
+                    prev_week_holidays = staff_info[s].get('前月最終週の休日数', 0) * 2 # 0.5日を1として扱うため2倍
+                    cross_month_total_value = model.NewIntVar(0, 42, f'cmtv_s{s_idx}')
+                    model.Add(cross_month_total_value == total_holiday_value + int(prev_week_holidays))
+                    # S0ルールを適用
+                    violation = model.NewBoolVar(f'cm_w_v_s{s_idx}'); model.Add(cross_month_total_value < 3).OnlyEnforceIf(violation); model.Add(cross_month_total_value >= 3).OnlyEnforceIf(violation.Not()); penalties.append(params['s0_penalty'] * violation)
+                # 通常の週
+                else:
+                    if len(week) == 7 and params['s0_on']:
+                        violation = model.NewBoolVar(f'f_w_v_s{s_idx}_w{w_idx}'); model.Add(total_holiday_value < 3).OnlyEnforceIf(violation); model.Add(total_holiday_value >= 3).OnlyEnforceIf(violation.Not()); penalties.append(params['s0_penalty'] * violation)
+                    elif len(week) < 7 and params['s2_on']:
+                        violation = model.NewBoolVar(f'p_w_v_s{s_idx}_w{w_idx}'); model.Add(total_holiday_value < 1).OnlyEnforceIf(violation); model.Add(total_holiday_value >= 1).OnlyEnforceIf(violation.Not()); penalties.append(params['s2_penalty'] * violation)
     
     if any([params['s1a_on'], params['s1b_on'], params['s1c_on']]):
         special_days_map = {'sun': sundays}
@@ -520,7 +570,7 @@ def solve_shift_model(params):
                     })
 
         all_half_day_requests = {s: {d for d, r in reqs.items() if r in ['AM有', 'PM有', 'AM休', 'PM休']} for s, reqs in requests_map.items()}
-        schedule_df = _create_schedule_df(shifts_values, staff, days, params['staff_df'], requests_map)
+        schedule_df = _create_schedule_df(shifts_values, staff, days, params['staff_df'], requests_map, year, month)
         summary_df = _create_summary(schedule_df, staff_info, year, month, params['event_units'], all_half_day_requests)
         message = f"求解ステータス: **{solver.StatusName(status)}** (ペナルティ合計: **{round(solver.ObjectiveValue())}**)"
         return True, schedule_df, summary_df, message, all_half_day_requests, penalty_details
@@ -644,6 +694,14 @@ with st.expander("▼ 各種パラメータを設定する", expanded=True):
                 if day_counter > num_days_in_month: break
 
     st.markdown("---")
+
+    # --- 月またぎ週の案内 ---
+    prev_month_date = datetime(year, month, 1) - relativedelta(days=1)
+    if prev_month_date.weekday() != 5: # 5: Saturday
+        st.info(f"ℹ️ **月またぎ週の休日調整が有効です**\n\n" 
+                f"{year}年{month}月の第1週は前月から続いています。公平な休日確保のため、スプレッドシート「希望休一覧」の **`前月最終週の休日数`** 列に、各職員の前月の最終週（{prev_month_date.month}月）の休日数を入力してください。\n\n" 
+                f"この値は、前月に作成された勤務表の「最終週休日数」列から転記できます。")
+
     create_button = st.button('勤務表を作成', type="primary", use_container_width=True)
 
 with st.expander("▼ ルール検証モード（上級者向け）"):
@@ -774,10 +832,17 @@ if create_button:
             summary_processed['職種'] = "サマリー"
             summary_processed = summary_processed[['職員番号', '職員名', '職種'] + list(range(1, num_days + 1))]
             
-            final_df_for_display = pd.concat([schedule_df, summary_processed], ignore_index=True)
+            # 最終週休日数列を勤務表の最後に結合
+            final_df_for_display = pd.concat([schedule_df.drop(columns=['最終週休日数']), summary_processed], ignore_index=True)
+            final_df_for_display['最終週休日数'] = schedule_df['最終週休日数'].tolist() + ['' for _ in range(len(summary_processed))]
+
             days_header = list(range(1, num_days + 1))
             weekdays_header = [ ['月','火','水','木','金','土','日'][calendar.weekday(year, month, d)] for d in days_header]
-            final_df_for_display.columns = pd.MultiIndex.from_tuples([('職員情報', '職員番号'), ('職員情報', '職員名'), ('職員情報', '職種')] + list(zip(days_header, weekdays_header)))
+            final_df_for_display.columns = pd.MultiIndex.from_tuples(
+                [('職員情報', '職員番号'), ('職員情報', '職員名'), ('職員情報', '職種')] + 
+                list(zip(days_header, weekdays_header)) + 
+                [('集計', '最終週休日数')]
+            )
             
             # --- ペナルティのハイライトと詳細表示 ---
             styler = final_df_for_display.style.set_properties(**{'text-align': 'center'})
