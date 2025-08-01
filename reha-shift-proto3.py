@@ -86,7 +86,7 @@ def gather_current_ui_settings():
         'h1', 'h1p', 'h2', 'h2p', 'h3', 'h3p', 'h5', 'h5p',
         'h_weekend_limit_penalty',
         's0', 's0p', 's2', 's2p', 's3', 's3p', 's4', 's4p',
-        's5', 's5p', 's6', 's6p', 's6ph', 'high_flat',
+        's5', 's5p', 's6', 's6p', 's6ph', 'high_flat', 's7', 's7p',
         's1a', 's1ap', 's1b', 's1bp', 's1c', 's1cp'
     ]
     for key in keys_to_save:
@@ -95,14 +95,16 @@ def gather_current_ui_settings():
     return settings
 
 # --- ヘルパー関数: サマリー作成 ---
-def _create_summary(schedule_df, staff_info_dict, year, month, event_units, all_half_day_requests):
+def _create_summary(schedule_df, staff_info_dict, year, month, event_units, unit_multiplier_map):
     num_days = calendar.monthrange(year, month)[1]; days = list(range(1, num_days + 1)); daily_summary = []
     schedule_df.columns = [col if isinstance(col, str) else int(col) for col in schedule_df.columns]
     for d in days:
         day_info = {}; 
-        work_symbols = ['', '○', '出', 'AM休', 'PM休', 'AM有', 'PM有']
+        work_symbols = ['', '○', '出', 'AM休', 'PM休', 'AM有', 'PM有', '出張', '前2h有', '後2h有']
         work_staff_ids = schedule_df[schedule_df[d].isin(work_symbols)]['職員番号']
-        half_day_staff_ids = [s for s, dates in all_half_day_requests.items() if d in dates]
+        
+        # 人数計算: 半休(AM/PM)は0.5人、それ以外の出勤(出張, 2h有休含む)は1人としてカウント
+        half_day_staff_ids = [sid for sid in work_staff_ids if unit_multiplier_map.get(sid, {}).get(d) == 0.5]
         total_workers = sum(0.5 if sid in half_day_staff_ids else 1 for sid in work_staff_ids)
         day_info['日'] = d; day_info['曜日'] = ['月','火','水','木','金','土','日'][calendar.weekday(year, month, d)]
         day_info['出勤者総数'] = total_workers
@@ -114,9 +116,10 @@ def _create_summary(schedule_df, staff_info_dict, year, month, event_units, all_
         day_info['地域包括'] = sum(0.5 if sid in half_day_staff_ids else 1 for sid in work_staff_ids if staff_info_dict[sid].get('役割1') == '地域包括専従')
         day_info['外来'] = sum(0.5 if sid in half_day_staff_ids else 1 for sid in work_staff_ids if staff_info_dict[sid].get('役割1') == '外来PT')
         if calendar.weekday(year, month, d) != 6:
-            pt_units = sum(int(staff_info_dict[sid]['1日の単位数']) * (0.5 if sid in half_day_staff_ids else 1) for sid in work_staff_ids if staff_info_dict[sid]['職種'] == '理学療法士')
-            ot_units = sum(int(staff_info_dict[sid]['1日の単位数']) * (0.5 if sid in half_day_staff_ids else 1) for sid in work_staff_ids if staff_info_dict[sid]['職種'] == '作業療法士')
-            st_units = sum(int(staff_info_dict[sid]['1日の単位数']) * (0.5 if sid in half_day_staff_ids else 1) for sid in work_staff_ids if staff_info_dict[sid]['職種'] == '言語聴覚士')
+            # 単位数計算: unit_multiplier_map を使用
+            pt_units = sum(int(staff_info_dict[sid]['1日の単位数']) * unit_multiplier_map.get(sid, {}).get(d, 1.0) for sid in work_staff_ids if staff_info_dict[sid]['職種'] == '理学療法士')
+            ot_units = sum(int(staff_info_dict[sid]['1日の単位数']) * unit_multiplier_map.get(sid, {}).get(d, 1.0) for sid in work_staff_ids if staff_info_dict[sid]['職種'] == '作業療法士')
+            st_units = sum(int(staff_info_dict[sid]['1日の単位数']) * unit_multiplier_map.get(sid, {}).get(d, 1.0) for sid in work_staff_ids if staff_info_dict[sid]['職種'] == '言語聴覚士')
             day_info['PT単位数'] = pt_units; day_info['OT単位数'] = ot_units; day_info['ST単位数'] = st_units
             day_info['PT+OT単位数'] = pt_units + ot_units
             total_event_unit = event_units['all'].get(d, 0) + event_units['pt'].get(d, 0) + event_units['ot'].get(d, 0) + event_units['st'].get(d, 0)
@@ -160,10 +163,12 @@ def _create_schedule_df(shifts_values, staff, days, staff_df, requests_map, year
                 elif request_type == '夏': row.append('夏')
                 else: row.append('-')
             else:
-                if request_type == '○': row.append('○')
-                elif request_type in ['AM休', 'PM休', 'AM有', 'PM有']: row.append(request_type)
-                elif request_type == '△': row.append('出')
-                else: row.append('')
+                if request_type in ['○', 'AM休', 'PM休', 'AM有', 'PM有', '出張', '前2h有', '後2h有']:
+                    row.append(request_type)
+                elif request_type == '△':
+                    row.append('出')
+                else:
+                    row.append('')
         schedule_data[s] = row
     schedule_df = pd.DataFrame.from_dict(schedule_data, orient='index', columns=days)
 
@@ -229,16 +234,29 @@ def solve_shift_model(params):
     job_types = {'PT': pt_staff, 'OT': ot_staff, 'ST': st_staff}
     params['job_types'] = job_types 
     
+    # --- 希望休と単位数倍率のマップを作成 ---
     requests_map = {s: {} for s in staff}
+    unit_multiplier_map = {s: {} for s in staff}
     for index, row in params['requests_df'].iterrows():
         staff_id = row['職員番号']
         if staff_id not in staff: continue
         for d in days:
-             col_name = str(d)
-             if col_name in row and pd.notna(row[col_name]):
-                 requests_map[staff_id][d] = row[col_name]
+            col_name = str(d)
+            if col_name in row and pd.notna(row[col_name]):
+                req = row[col_name]
+                requests_map[staff_id][d] = req
+                # 単位数倍率を設定
+                if req in ['AM休', 'PM休', 'AM有', 'PM有']:
+                    unit_multiplier_map[staff_id][d] = 0.5
+                elif req == '出張':
+                    unit_multiplier_map[staff_id][d] = 0.0
+                elif req in ['前2h有', '後2h有']:
+                    unit_multiplier_map[staff_id][d] = 0.7
+                else:
+                    unit_multiplier_map[staff_id][d] = 1.0 # 通常の出勤
 
     params['requests_map'] = requests_map
+    params['unit_multiplier_map'] = unit_multiplier_map
 
     # --- 月またぎ週の判定 ---
     prev_month_date = datetime(year, month, 1) - relativedelta(days=1)
@@ -292,8 +310,12 @@ def solve_shift_model(params):
                     if req_type == '×' or req_type == '有': model.Add(shifts[(s, d)] == 0)
                     else: model.Add(shifts[(s, d)] == 1)
                 else:
-                    if req_type in ['×', '有', '特', '夏']: penalties.append(params['h2_penalty'] * shifts[(s, d)])
-                    elif req_type in ['○', 'AM有', 'PM有', 'AM休', 'PM休']: penalties.append(params['h2_penalty'] * (1 - shifts[(s, d)]))
+                    # 休み希望 (必ず休む)
+                    if req_type in ['×', '有', '特', '夏']:
+                        penalties.append(params['h2_penalty'] * shifts[(s, d)])
+                    # 出勤希望 (必ず出勤する)
+                    elif req_type in ['○', 'AM有', 'PM有', 'AM休', 'PM休', '出張', '前2h有', '後2h有']:
+                        penalties.append(params['h2_penalty'] * (1 - shifts[(s, d)]))
 
     if params['h3_on']:
         for d in days:
@@ -417,12 +439,19 @@ def solve_shift_model(params):
     if params['s6_on']:
         unit_penalty_weight = params.get('s6_penalty_heavy', 4) if params.get('high_flat_penalty') else params.get('s6_penalty', 2)
         event_units = params['event_units']
-        all_half_day_requests = {s: {d for d, r in reqs.items() if r in ['AM有', 'PM有', 'AM休', 'PM休']} for s, reqs in requests_map.items()}
+        unit_multiplier_map = params['unit_multiplier_map'] # 追加
+
         total_weekday_units_by_job = {}
         for job, members in job_types.items():
             if not members: total_weekday_units_by_job[job] = 0; continue
-            total_units = sum(int(staff_info[s]['1日の単位数']) * (len(weekdays) / num_days) * (num_days - 9 - sum(1 for r in requests_map.get(s, {}).values() if r in ['有','特','夏'])) for s in members)
+            # 休日希望日を考慮した総単位数を計算 (より正確に)
+            total_units = sum(
+                int(staff_info[s]['1日の単位数']) * 
+                (1 - sum(1 for d in weekdays if requests_map.get(s, {}).get(d) in ['有','特','夏','×','△']) / len(weekdays)) 
+                for s in members
+            )
             total_weekday_units_by_job[job] = total_units
+
         total_all_jobs_units = sum(total_weekday_units_by_job.values())
         ratios = {job: total_units / total_all_jobs_units if total_all_jobs_units > 0 else 0 for job, total_units in total_weekday_units_by_job.items()}
         avg_residual_units_by_job = {}
@@ -439,13 +468,29 @@ def solve_shift_model(params):
             for d in weekdays:
                 provided_units_expr_list = []
                 for s in members:
-                    unit = int(staff_info[s]['1日の単位数']); is_half = d in all_half_day_requests.get(s, set()); constant_unit = int(unit * 0.5) if is_half else unit
+                    unit = int(staff_info[s]['1日の単位数'])
+                    multiplier = unit_multiplier_map.get(s, {}).get(d, 1.0) # デフォルトは1.0
+                    constant_unit = int(unit * multiplier)
                     term = model.NewIntVar(0, constant_unit, f'p_u_s{s}_d{d}'); model.Add(term == shifts[(s,d)] * constant_unit); provided_units_expr_list.append(term)
                 provided_units_expr = sum(provided_units_expr_list)
                 event_unit_for_day = event_units[job.lower()].get(d, 0) + (event_units['all'].get(d, 0) * ratio)
                 residual_units_expr = model.NewIntVar(-4000, 4000, f'r_{job}_{d}'); model.Add(residual_units_expr == provided_units_expr - round(event_unit_for_day))
                 diff_expr = model.NewIntVar(-4000, 4000, f'u_d_{job}_{d}'); model.Add(diff_expr == residual_units_expr - round(avg_residual_units))
                 abs_diff_expr = model.NewIntVar(0, 4000, f'a_u_d_{job}_{d}'); model.AddAbsEquality(abs_diff_expr, diff_expr); penalties.append(unit_penalty_weight * abs_diff_expr)
+
+    # S7: 連続勤務日数制限 (新規追加)
+    if params.get('s7_on', False):
+        max_consecutive_days = 5 # 最大許容連続勤務日数
+        for s in staff:
+            if s in params['part_time_staff_ids']: continue
+            for d in range(1, num_days - max_consecutive_days + 1):
+                # 6日間 (max_consecutive_days + 1) の勤務変数を取得
+                consecutive_shifts = [shifts[(s, d + i)] for i in range(max_consecutive_days + 1)]
+                # 6日連続で勤務した場合にペナルティを課す
+                is_over = model.NewBoolVar(f's7_over_{s}_{d}')
+                model.Add(sum(consecutive_shifts) == max_consecutive_days + 1).OnlyEnforceIf(is_over)
+                model.Add(sum(consecutive_shifts) < max_consecutive_days + 1).OnlyEnforceIf(is_over.Not())
+                penalties.append(params['s7_penalty'] * is_over)
 
     model.Minimize(sum(penalties))
     solver = cp_model.CpSolver(); solver.parameters.max_time_in_seconds = 60.0; status = solver.Solve(model)
@@ -485,8 +530,8 @@ def solve_shift_model(params):
                             'day': d,
                             'detail': f"{d}日の「{req_type}」希望に反して出勤になっています。"
                         })
-                    # 希望が出勤（○, AM/PM有, AM/PM休）なのに休みになっている
-                    elif req_type in ['○', 'AM有', 'PM有', 'AM休', 'PM休'] and not is_working:
+                    # 希望が出勤（○, AM/PM有, AM/PM休, etc.）なのに休みになっている
+                    elif req_type in ['○', 'AM有', 'PM有', 'AM休', 'PM休', '出張', '前2h有', '後2h有'] and not is_working:
                          penalty_details.append({
                             'rule': 'H2: 希望休違反',
                             'staff': staff_info[s]['職員名'],
@@ -559,6 +604,20 @@ def solve_shift_model(params):
                              # 最終週のS2違反はソルバーの努力目標とし、ペナルティとしては表示しない
                              pass
 
+        # S7: 連続勤務日数
+        if params.get('s7_on', False):
+            max_consecutive_days = 5
+            for s in staff:
+                if s in params['part_time_staff_ids']: continue
+                for d in range(1, num_days - max_consecutive_days + 1):
+                    if sum(shifts_values.get((s, d + i), 0) for i in range(max_consecutive_days + 1)) == max_consecutive_days + 1:
+                        penalty_details.append({
+                            'rule': 'S7: 連続勤務日数超過',
+                            'staff': staff_info[s]['職員名'],
+                            'day': f'{d}日～{d + max_consecutive_days}日',
+                            'detail': f'{max_consecutive_days + 1}日間の連続勤務が発生しています。'
+                        })
+
         # S5: 回復期担当者
         if params['s5_on']:
             for d in days:
@@ -579,14 +638,13 @@ def solve_shift_model(params):
                         'detail': f"{d}日に回復期担当のOTが出勤していません。"
                     })
 
-        all_half_day_requests = {s: {d for d, r in reqs.items() if r in ['AM有', 'PM有', 'AM休', 'PM休']} for s, reqs in requests_map.items()}
         schedule_df = _create_schedule_df(shifts_values, staff, days, params['staff_df'], requests_map, year, month)
-        summary_df = _create_summary(schedule_df, staff_info, year, month, params['event_units'], all_half_day_requests)
+        summary_df = _create_summary(schedule_df, staff_info, year, month, params['event_units'], params['unit_multiplier_map'])
         message = f"求解ステータス: **{solver.StatusName(status)}** (ペナルティ合計: **{round(solver.ObjectiveValue())}**)"
-        return True, schedule_df, summary_df, message, all_half_day_requests, penalty_details
+        return True, schedule_df, summary_df, message, penalty_details
     else:
         message = f"致命的なエラー: ハード制約が矛盾しているため、勤務表を作成できませんでした。({solver.StatusName(status)})"
-        return False, pd.DataFrame(), pd.DataFrame(), message, None, []
+        return False, pd.DataFrame(), pd.DataFrame(), message, []
 
 # --- Streamlit UI ---
 st.set_page_config(layout="wide")
@@ -765,7 +823,8 @@ with st.expander("▼ ルール検証モード（上級者向け）"):
         params_ui['s6_penalty'] = c_s6_1.number_input("S6 標準P", value=st.session_state.get('s6p', 2), disabled=not params_ui['s6_on'], key='s6p')
         params_ui['s6_penalty_heavy'] = c_s6_2.number_input("S6 強化P", value=st.session_state.get('s6ph', 4), disabled=not params_ui['s6_on'], key='s6ph')
     with s_cols2[2]:
-        st.markdown("") 
+        params_ui['s7_on'] = st.toggle('S7: 連続勤務日数', value=st.session_state.get('s7', True), key='s7')
+        params_ui['s7_penalty'] = st.number_input("S7 Penalty", value=st.session_state.get('s7p', 50), disabled=not params_ui['s7_on'], key='s7p')
     with s_cols2[3]:
         params_ui['high_flat_penalty'] = st.toggle('平準化ペナルティ強化', value=st.session_state.get('high_flat', False), key='high_flat', help="S6のペナルティを「標準P」ではなく「強化P」で計算します。")
         
@@ -830,7 +889,7 @@ if create_button:
             params['staff_df']['職員名'] = params['staff_df']['職種'] + " " + params['staff_df']['職員番号'].astype(str)
             st.info("職員一覧に「職員名」列がなかったため、仮の職員名を生成しました。")
         
-        is_feasible, schedule_df, summary_df, message, all_half_day_requests, penalty_details = solve_shift_model(params)
+        is_feasible, schedule_df, summary_df, message, penalty_details = solve_shift_model(params)
         
         st.info(message)
         if is_feasible:
@@ -892,13 +951,17 @@ if create_button:
                         
                         # H3, S5 (日付単位のペナルティ)
                         elif day_col_tuple and day_col_tuple in df.columns:
-                             summary_rows = data[data[('職員情報', '職種')] == 'サマリー'].index
-                             if not summary_rows.empty:
-                                row_idx = summary_rows[0]
-                                if p['rule'] == 'H3: 役職者未配置':
-                                     df.loc[row_idx, day_col_tuple] = 'background-color: #ffcccc' # 役職者行をハイライト
-                                elif p['rule'] == 'S5: 回復期担当未配置':
-                                     df.loc[row_idx, day_col_tuple] = 'background-color: #ffcccc' # 回復期行をハイライト
+                            target_summary_row_name = None
+                            if p['rule'] == 'H3: 役職者未配置':
+                                target_summary_row_name = '役職者'
+                            elif p['rule'] == 'S5: 回復期担当未配置':
+                                target_summary_row_name = '回復期'
+                            
+                            if target_summary_row_name:
+                                summary_rows = data[data[('職員情報', '職員名')] == target_summary_row_name].index
+                                if not summary_rows.empty:
+                                    row_idx = summary_rows[0]
+                                    df.loc[row_idx, day_col_tuple] = 'background-color: #ffcccc'
 
                     return df
                 
