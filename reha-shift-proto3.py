@@ -86,7 +86,7 @@ def gather_current_ui_settings():
         'h1', 'h1p', 'h2', 'h2p', 'h3', 'h3p', 'h5', 'h5p',
         'h_weekend_limit_penalty',
         's0', 's0p', 's2', 's2p', 's3', 's3p', 's4', 's4p',
-        's5', 's5p', 's6', 's6p', 's6ph', 'high_flat',
+        's5', 's5p', 's6', 's6p', 's6ph', 'high_flat', 's7', 's7p',
         's1a', 's1ap', 's1b', 's1bp', 's1c', 's1cp'
     ]
     for key in keys_to_save:
@@ -478,6 +478,20 @@ def solve_shift_model(params):
                 diff_expr = model.NewIntVar(-4000, 4000, f'u_d_{job}_{d}'); model.Add(diff_expr == residual_units_expr - round(avg_residual_units))
                 abs_diff_expr = model.NewIntVar(0, 4000, f'a_u_d_{job}_{d}'); model.AddAbsEquality(abs_diff_expr, diff_expr); penalties.append(unit_penalty_weight * abs_diff_expr)
 
+    # S7: 連続勤務日数制限 (新規追加)
+    if params.get('s7_on', False):
+        max_consecutive_days = 5 # 最大許容連続勤務日数
+        for s in staff:
+            if s in params['part_time_staff_ids']: continue
+            for d in range(1, num_days - max_consecutive_days + 1):
+                # 6日間 (max_consecutive_days + 1) の勤務変数を取得
+                consecutive_shifts = [shifts[(s, d + i)] for i in range(max_consecutive_days + 1)]
+                # 6日連続で勤務した場合にペナルティを課す
+                is_over = model.NewBoolVar(f's7_over_{s}_{d}')
+                model.Add(sum(consecutive_shifts) == max_consecutive_days + 1).OnlyEnforceIf(is_over)
+                model.Add(sum(consecutive_shifts) < max_consecutive_days + 1).OnlyEnforceIf(is_over.Not())
+                penalties.append(params['s7_penalty'] * is_over)
+
     model.Minimize(sum(penalties))
     solver = cp_model.CpSolver(); solver.parameters.max_time_in_seconds = 60.0; status = solver.Solve(model)
     
@@ -589,6 +603,20 @@ def solve_shift_model(params):
                         elif len(week) < 7 and params['s2_on'] and total_holiday_value < 1:
                              # 最終週のS2違反はソルバーの努力目標とし、ペナルティとしては表示しない
                              pass
+
+        # S7: 連続勤務日数
+        if params.get('s7_on', False):
+            max_consecutive_days = 5
+            for s in staff:
+                if s in params['part_time_staff_ids']: continue
+                for d in range(1, num_days - max_consecutive_days + 1):
+                    if sum(shifts_values.get((s, d + i), 0) for i in range(max_consecutive_days + 1)) == max_consecutive_days + 1:
+                        penalty_details.append({
+                            'rule': 'S7: 連続勤務日数超過',
+                            'staff': staff_info[s]['職員名'],
+                            'day': f'{d}日～{d + max_consecutive_days}日',
+                            'detail': f'{max_consecutive_days + 1}日間の連続勤務が発生しています。'
+                        })
 
         # S5: 回復期担当者
         if params['s5_on']:
@@ -795,7 +823,8 @@ with st.expander("▼ ルール検証モード（上級者向け）"):
         params_ui['s6_penalty'] = c_s6_1.number_input("S6 標準P", value=st.session_state.get('s6p', 2), disabled=not params_ui['s6_on'], key='s6p')
         params_ui['s6_penalty_heavy'] = c_s6_2.number_input("S6 強化P", value=st.session_state.get('s6ph', 4), disabled=not params_ui['s6_on'], key='s6ph')
     with s_cols2[2]:
-        st.markdown("") 
+        params_ui['s7_on'] = st.toggle('S7: 連続勤務日数', value=st.session_state.get('s7', True), key='s7')
+        params_ui['s7_penalty'] = st.number_input("S7 Penalty", value=st.session_state.get('s7p', 50), disabled=not params_ui['s7_on'], key='s7p')
     with s_cols2[3]:
         params_ui['high_flat_penalty'] = st.toggle('平準化ペナルティ強化', value=st.session_state.get('high_flat', False), key='high_flat', help="S6のペナルティを「標準P」ではなく「強化P」で計算します。")
         
