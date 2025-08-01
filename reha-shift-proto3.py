@@ -823,6 +823,7 @@ with st.expander("▼ ルール検証モード（上級者向け）"):
         params_ui['s6_penalty'] = c_s6_1.number_input("S6 標準P", value=st.session_state.get('s6p', 2), disabled=not params_ui['s6_on'], key='s6p')
         params_ui['s6_penalty_heavy'] = c_s6_2.number_input("S6 強化P", value=st.session_state.get('s6ph', 4), disabled=not params_ui['s6_on'], key='s6ph')
     with s_cols2[2]:
+        with s_cols2[2]:
         params_ui['s7_on'] = st.toggle('S7: 連続勤務日数', value=st.session_state.get('s7', True), key='s7')
         params_ui['s7_penalty'] = st.number_input("S7 Penalty", value=st.session_state.get('s7p', 50), disabled=not params_ui['s7_on'], key='s7p')
     with s_cols2[3]:
