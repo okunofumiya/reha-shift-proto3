@@ -931,26 +931,40 @@ if create_button:
                     df.loc[:,:] = '' # デフォルトはスタイルなし
 
                     for p in penalty_details:
-                        day_col_tuple = None
+                        day_col_tuples = [] # 複数の日をハイライトするためにリスト化
                         if p['day'] != '-':
-                            day_col = int(p['day'])
-                            weekday_str = weekdays_header[day_col - 1]
-                            day_col_tuple = (day_col, weekday_str)
+                            try:
+                                # 単一日付の場合
+                                day_col = int(p['day'])
+                                weekday_str = weekdays_header[day_col - 1]
+                                day_col_tuples.append((day_col, weekday_str))
+                            except (ValueError, TypeError):
+                                # '12日～17日' のような範囲指定の場合
+                                if isinstance(p['day'], str) and '～' in p['day']:
+                                    try:
+                                        start_day_str, end_day_str = p['day'].split('～')
+                                        start_day = int(start_day_str.replace('日', ''))
+                                        end_day = int(end_day_str.replace('日', ''))
+                                        for day in range(start_day, end_day + 1):
+                                            weekday_str = weekdays_header[day - 1]
+                                            day_col_tuples.append((day, weekday_str))
+                                    except (ValueError, IndexError):
+                                        pass # パース失敗時はハイライトしない
 
-                        # H2, H5, S0/S2 (職員単位のペナルティ)
+                        # 職員が特定されているペナルティ
                         if p['staff'] != '-':
                             staff_rows = data[data[('職員情報', '職員名')] == p['staff']].index
                             if not staff_rows.empty:
                                 row_idx = staff_rows[0]
-                                # 日付が特定されている場合 (H2)
-                                if day_col_tuple and day_col_tuple in df.columns:
-                                    df.loc[row_idx, day_col_tuple] = 'background-color: #ffcccc'
-                                # 職員全体にかかるペナルティ (H1, H5, S0/S2)
-                                else:
+                                if day_col_tuples: # 日付が特定されている場合
+                                    for day_col_tuple in day_col_tuples:
+                                        if day_col_tuple in df.columns:
+                                            df.loc[row_idx, day_col_tuple] = 'background-color: #ffcccc'
+                                else: # 職員全体にかかるペナルティ
                                     df.loc[row_idx, ('職員情報', '職員名')] = 'background-color: #ffcccc'
                         
-                        # H3, S5 (日付単位のペナルティ)
-                        elif day_col_tuple and day_col_tuple in df.columns:
+                        # 職員が特定されていないペナルティ (日付単位)
+                        elif day_col_tuples:
                             target_summary_row_name = None
                             if p['rule'] == 'H3: 役職者未配置':
                                 target_summary_row_name = '役職者'
@@ -961,7 +975,10 @@ if create_button:
                                 summary_rows = data[data[('職員情報', '職員名')] == target_summary_row_name].index
                                 if not summary_rows.empty:
                                     row_idx = summary_rows[0]
-                                    df.loc[row_idx, day_col_tuple] = 'background-color: #ffcccc'
+                                    # 日付単位のペナルティは範囲を想定していないが、念のためループ
+                                    for day_col_tuple in day_col_tuples:
+                                        if day_col_tuple in df.columns:
+                                            df.loc[row_idx, day_col_tuple] = 'background-color: #ffcccc'
 
                     return df
                 
