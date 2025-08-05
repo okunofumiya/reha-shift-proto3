@@ -318,22 +318,31 @@ def solve_shift_model(params):
     penalty_details = []
 
     if params['h1_on']:
-        half_holiday_roles = {role for role, settings in symbol_settings.items() if settings['振る舞い:休日扱い？'] and settings['振る舞い:勤務係数'] > 0.0}
+        # H1ルールの計算対象外とする「全休」の役割を定義
+        non_countable_holiday_roles = {'HOLIDAY_PAID', 'HOLIDAY_SPECIAL', 'HOLIDAY_SUMMER'}
+        # 半休の役割を定義
+        half_holiday_roles = {role for role, settings in symbol_settings.items() if settings['振る舞い:休日扱い？'] and 0 < settings['振る舞い:勤務係数'] < 1.0}
+
         for s_idx, s in enumerate(staff):
             if s in params['part_time_staff_ids']: continue
             s_reqs = requests_map.get(s, {})
-            
-            # 半休希望の日数をカウント
-            num_half_holidays_req = sum(1 for role in s_reqs.values() if role in half_holiday_roles)
-            
-            # 全ての全休の日数（希望休＋公休）を計算
-            total_full_holidays = sum(1 - shifts[(s, d)] for d in days)
-            
-            # 休日価値を計算（全休=2, 半休=1）
+
+            # スタッフごとに、計算対象外の全休日数と、半休日数を集計
+            num_non_countable_holidays = sum(1 for role in s_reqs.values() if role in non_countable_holiday_roles)
+            num_half_holidays = sum(1 for role in s_reqs.values() if role in half_holiday_roles)
+
+            # ソルバーが決定する全休日の合計
+            total_full_holidays_by_solver = sum(1 - shifts[(s, d)] for d in days)
+
+            # 純粋な「公休」（H1ルールでカウントすべき全休）の日数を計算
+            countable_full_holidays = model.NewIntVar(0, num_days, f'countable_full_holidays_{s}')
+            model.Add(countable_full_holidays == total_full_holidays_by_solver - num_non_countable_holidays)
+
+            #  H1ルールで評価する休日価値を計算（公休2点、半休1点）
             total_holiday_value = model.NewIntVar(0, num_days * 2, f'total_holiday_value_{s}')
-            model.Add(total_holiday_value == 2 * total_full_holidays + num_half_holidays_req)
-            
-            # 目標値（18）との差分に対するペナルティを計算
+            model.Add(total_holiday_value == 2 * countable_full_holidays + num_half_holidays)
+
+            # 目標値（18）との差分に対するペナルティ
             deviation = model.NewIntVar(-num_days * 2, num_days * 2, f'h1_dev_{s}')
             model.Add(deviation == total_holiday_value - 18)
             abs_deviation = model.NewIntVar(0, num_days * 2, f'h1_abs_dev_{s}')
