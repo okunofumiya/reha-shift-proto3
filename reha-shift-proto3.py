@@ -94,13 +94,42 @@ def gather_current_ui_settings():
             settings[key] = st.session_state[key]
     return settings
 
+# --- Gspread ヘルパー関数 (記号設定) (新規追加) ---
+@st.cache_data(ttl=300)
+def get_symbol_settings(_spreadsheet):
+    """「記号設定」シートから設定を読み込み、整形して返す"""
+    try:
+        worksheet = _spreadsheet.worksheet("記号設定")
+        df = get_as_dataframe(worksheet, header=0)
+        df.dropna(how='all', subset=['役割'], inplace=True)
+
+        # データの前処理
+        df['振る舞い:休日扱い？'] = df['振る舞い:休日扱い？'].astype(str).str.lower().isin(['true', 'yes', 'はい', '1'])
+        df['振る舞い:希望は絶対？'] = df['振る舞い:希望は絶対？'].astype(str).str.lower().isin(['true', 'yes', 'はい', '1'])
+        df['振る舞い:勤務係数'] = pd.to_numeric(df['振る舞い:勤務係数'], errors='coerce').fillna(1.0)
+        df['入力で使う記号'] = df['入力で使う記号'].astype(str).apply(lambda x: [s.strip() for s in x.split(',') if s.strip()] if pd.notna(x) else [])
+        
+        # 役割をキーにした辞書に変換
+        settings_dict = df.set_index('役割').to_dict('index')
+        return settings_dict
+    except gspread.exceptions.WorksheetNotFound:
+        st.error("エラー: スプレッドシートに '記号設定' という名前のシートが見つかりません。作成してください。")
+        return None
+    except Exception as e:
+        st.error(f"「記号設定」シートの読み込み中に予期せぬエラーが発生しました: {e}")
+        st.exception(e)
+        return None
+
 # --- ヘルパー関数: サマリー作成 ---
-def _create_summary(schedule_df, staff_info_dict, year, month, event_units, unit_multiplier_map):
+def _create_summary(schedule_df, staff_info_dict, year, month, event_units, unit_multiplier_map, symbol_settings):
     num_days = calendar.monthrange(year, month)[1]; days = list(range(1, num_days + 1)); daily_summary = []
     schedule_df.columns = [col if isinstance(col, str) else int(col) for col in schedule_df.columns]
+    
+    # 「勤務」とみなす記号のリストを作成
+    work_symbols = {s['出力される記号'] for s in symbol_settings.values() if s['振る舞い:勤務係数'] > 0.0}
+
     for d in days:
         day_info = {}; 
-        work_symbols = ['', '○', '出', 'AM休', 'PM休', 'AM有', 'PM有', '出張', '前2h有', '後2h有']
         work_staff_ids = schedule_df[schedule_df[d].isin(work_symbols)]['職員番号']
         
         # 人数計算: 半休(AM/PM)は0.5人、それ以外の出勤(出張, 2h有休含む)は1人としてカウント
@@ -149,50 +178,66 @@ def _create_summary(schedule_df, staff_info_dict, year, month, event_units, unit
 
     return summary_df
 
-def _create_schedule_df(shifts_values, staff, days, staff_df, requests_map, year, month):
+def _create_schedule_df(shifts_values, staff, days, staff_df, requests_map, year, month, symbol_settings):
     schedule_data = {}
+    # 役割ごとの出力記号を取得
+    sym_work_def = symbol_settings.get('WORK_DEFAULT', {}).get('出力される記号', '')
+    sym_holi_def = symbol_settings.get('HOLIDAY_DEFAULT', {}).get('出力される記号', '-')
+    sym_work_from_weak = symbol_settings.get('WORK_FROM_WEAK', {}).get('出力される記号', '出')
+
     for s in staff:
         row = []; s_requests = requests_map.get(s, {})
         for d in days:
-            request_type = s_requests.get(d)
-            if shifts_values.get((s, d), 0) == 0:
-                if request_type == '×': row.append('×')
-                elif request_type == '△': row.append('△')
-                elif request_type == '有': row.append('有')
-                elif request_type == '特': row.append('特')
-                elif request_type == '夏': row.append('夏')
-                else: row.append('-')
-            else:
-                if request_type in ['○', 'AM休', 'PM休', 'AM有', 'PM有', '出張', '前2h有', '後2h有']:
-                    row.append(request_type)
-                elif request_type == '△':
-                    row.append('出')
+            request_role = s_requests.get(d)
+            is_working = shifts_values.get((s, d), 0) == 1
+
+            if is_working:
+                if request_role:
+                    # 準希望休(HOLIDAY_WEAK)が出勤になった場合
+                    if request_role == 'HOLIDAY_WEAK':
+                        row.append(sym_work_from_weak)
+                    # それ以外の希望（勤務希望など）
+                    else:
+                        row.append(symbol_settings.get(request_role, {}).get('出力される記号', sym_work_def))
                 else:
-                    row.append('')
+                    # 希望がない日の勤務
+                    row.append(sym_work_def)
+            else: # 休みの場合
+                if request_role:
+                    # 希望した休み
+                    row.append(symbol_settings.get(request_role, {}).get('出力される記号', sym_holi_def))
+                else:
+                    # 希望がない日の休み（ソルバーが割り当てた休み）
+                    row.append(sym_holi_def)
         schedule_data[s] = row
     schedule_df = pd.DataFrame.from_dict(schedule_data, orient='index', columns=days)
 
     # --- 最終週の休日数を計算 (修正済み) ---
     num_days = calendar.monthrange(year, month)[1]
-    # calendar.weekday() は 月曜=0, 日曜=6。週の始まりを日曜日に統一。
     last_day_weekday = calendar.weekday(year, month, num_days)
     start_of_last_week = num_days - ((last_day_weekday + 1) % 7)
     final_week_days = [d for d in days if d >= start_of_last_week]
+
+    # 記号設定から休日の役割と係数を特定
+    holiday_roles = {r: s['振る舞い:勤務係数'] for r, s in symbol_settings.items() if s['振る舞い:休日扱い？']}
 
     last_week_holidays = {}
     for s in staff:
         holidays = 0
         s_requests = requests_map.get(s, {})
         for d in final_week_days:
-            req = s_requests.get(d)
+            req_role = s_requests.get(d)
             is_working = shifts_values.get((s, d), 0) == 1
 
             if not is_working:
-                # フルで休みの場合 (記号: -, ×, 有, 特, 夏, △) は1日加算
+                # フルで休みの場合 (公休または希望休)
                 holidays += 1
-            elif req in ['AM休', 'PM休', 'AM有', 'PM有']:
-                # 半日休みの場合 (AM/PM休, AM/PM有) は0.5日加算
-                holidays += 0.5
+            elif req_role in holiday_roles:
+                # 半日休みなどの場合 (勤務係数が0より大きい休日扱い)
+                work_coefficient = holiday_roles[req_role]
+                if work_coefficient > 0:
+                    holidays += (1 - work_coefficient) # 0.5日休みなら 1-0.5=0.5 を加算
+
         last_week_holidays[s] = holidays
     
     schedule_df['最終週休日数'] = schedule_df.index.map(last_week_holidays)
@@ -232,34 +277,37 @@ def solve_shift_model(params):
     chiiki_staff = [s for s in staff if staff_info[s].get('役割1') == '地域包括専従']
     params['kaifukuki_pt'] = kaifukuki_pt; params['kaifukuki_ot'] = kaifukuki_ot; params['gairai_staff'] = gairai_staff 
     job_types = {'PT': pt_staff, 'OT': ot_staff, 'ST': st_staff}
-    params['job_types'] = job_types 
+    """    params['job_types'] = job_types 
     
-    # --- 希望休と単位数倍率のマップを作成 ---
+    # --- 新方式: 記号設定に基づいて希望休と単位数倍率のマップを作成 ---
+    symbol_settings = params['symbol_settings']
+    # 入力記号から役割への逆引きマップを作成
+    symbol_to_role_map = {}
+    for role, settings in symbol_settings.items():
+        for symbol in settings.get('入力で使う記号', []):
+            symbol_to_role_map[symbol] = role
+
     requests_map = {s: {} for s in staff}
     unit_multiplier_map = {s: {} for s in staff}
+    
     for index, row in params['requests_df'].iterrows():
         staff_id = row['職員番号']
         if staff_id not in staff: continue
         for d in days:
             col_name = str(d)
             if col_name in row and pd.notna(row[col_name]):
-                req = row[col_name]
-                requests_map[staff_id][d] = req
-                # 単位数倍率を設定
-                if req in ['AM休', 'PM休', 'AM有', 'PM有']:
-                    unit_multiplier_map[staff_id][d] = 0.5
-                elif req == '出張':
-                    unit_multiplier_map[staff_id][d] = 0.0
-                elif req in ['前2h有', '後2h有']:
-                    unit_multiplier_map[staff_id][d] = 0.7
-                else:
-                    unit_multiplier_map[staff_id][d] = 1.0 # 通常の出勤
+                request_symbol = row[col_name]
+                role = symbol_to_role_map.get(request_symbol)
+                if role:
+                    requests_map[staff_id][d] = role # 記号の代わりに役割を格納
+                    # 単位数倍率を設定
+                    unit_multiplier_map[staff_id][d] = symbol_settings[role].get('振る舞い:勤務係数', 1.0)
 
     params['requests_map'] = requests_map
     params['unit_multiplier_map'] = unit_multiplier_map
 
     # --- 月またぎ週の判定 ---
-    prev_month_date = datetime(year, month, 1) - relativedelta(days=1)
+    prev_month_date = datetime(year, month, 1) - relativedelta(days=1)""
     is_cross_month_week = prev_month_date.weekday() != 5 # 5: Saturday
 
     # --- 前月最終週の休日数をスタッフ情報にマージ ---
@@ -284,38 +332,53 @@ def solve_shift_model(params):
         for s_idx, s in enumerate(staff):
             if s in params['part_time_staff_ids']: continue
             s_reqs = requests_map.get(s, {})
-            num_paid_leave = sum(1 for r in s_reqs.values() if r == '有')
-            num_special_leave = sum(1 for r in s_reqs.values() if r == '特')
-            num_summer_leave = sum(1 for r in s_reqs.values() if r == '夏')
-            num_half_kokyu = sum(1 for r in s_reqs.values() if r in ['AM休', 'PM休'])
             
+            # 記号設定から「休日扱い」かつ「勤務係数が0.0」の役割（＝全休）を特定
+            full_holiday_roles = {role for role, settings in symbol_settings.items() 
+                                  if settings['振る舞い:休日扱い？'] and settings['振る舞い:勤務係数'] == 0.0}
+            # 記号設定から「休日扱い」かつ「勤務係数が0.0より大きい」役割（＝半休など）を特定
+            half_holiday_roles = {role for role, settings in symbol_settings.items() 
+                                  if settings['振る舞い:休日扱い？'] and settings['振る舞い:勤務係数'] > 0.0}
+
+            num_full_holidays_req = sum(1 for role in s_reqs.values() if role in full_holiday_roles)
+            num_half_holidays_req = sum(1 for role in s_reqs.values() if role in half_holiday_roles)
+
+            # ソルバーが決定する公休（-）の日数を計算
             full_holidays_total = sum(1 - shifts[(s, d)] for d in days)
             full_holidays_kokyu = model.NewIntVar(0, num_days, f'full_kokyu_{s}')
-            model.Add(full_holidays_kokyu == full_holidays_total - num_paid_leave - num_special_leave - num_summer_leave)
+            model.Add(full_holidays_kokyu == full_holidays_total - num_full_holidays_req)
             
+            # 休日価値を計算（全休=2, 半休=1）
             total_holiday_value = model.NewIntVar(0, num_days * 2, f'total_holiday_value_{s}')
-            model.Add(total_holiday_value == 2 * full_holidays_kokyu + num_half_kokyu)
+            model.Add(total_holiday_value == 2 * full_holidays_kokyu + num_half_holidays_req)
             
             deviation = model.NewIntVar(-num_days * 2, num_days * 2, f'h1_dev_{s}')
-            model.Add(deviation == total_holiday_value - 18)
+            model.Add(deviation == total_holiday_value - 18) # 目標は9日 = 価値18
             
             abs_deviation = model.NewIntVar(0, num_days * 2, f'h1_abs_dev_{s}')
             model.AddAbsEquality(abs_deviation, deviation)
             penalties.append(params['h1_penalty'] * abs_deviation)
 
     if params['h2_on']:
+        # 「希望は絶対？」がTrueの役割を特定
+        absolute_roles = {role for role, settings in symbol_settings.items() if settings['振る舞い:希望は絶対？']}
+        
         for s, reqs in requests_map.items():
-            for d, req_type in reqs.items():
-                if s in params['part_time_staff_ids']:
-                    if req_type == '×' or req_type == '有': model.Add(shifts[(s, d)] == 0)
-                    else: model.Add(shifts[(s, d)] == 1)
-                else:
-                    # 休み希望 (必ず休む)
-                    if req_type in ['×', '有', '特', '夏']:
-                        penalties.append(params['h2_penalty'] * shifts[(s, d)])
-                    # 出勤希望 (必ず出勤する)
-                    elif req_type in ['○', 'AM有', 'PM有', 'AM休', 'PM休', '出張', '前2h有', '後2h有']:
-                        penalties.append(params['h2_penalty'] * (1 - shifts[(s, d)]))
+            for d, role in reqs.items():
+                if role in absolute_roles:
+                    is_holiday_role = symbol_settings[role]['振る舞い:休日扱い？']
+                    # パートタイマーは休日希望のみ考慮
+                    if s in params['part_time_staff_ids']:
+                        if is_holiday_role:
+                            model.Add(shifts[(s, d)] == 0)
+                    # フルタイマー
+                    else:
+                        if is_holiday_role:
+                            # 休日希望なのに出勤(1)になっていたらペナルティ
+                            penalties.append(params['h2_penalty'] * shifts[(s, d)])
+                        else:
+                            # 勤務希望なのに休み(0)になっていたらペナルティ
+                            penalties.append(params['h2_penalty'] * (1 - shifts[(s, d)]))
 
     if params['h3_on']:
         for d in days:
@@ -373,9 +436,13 @@ def solve_shift_model(params):
             penalties.append(sunday_overwork_penalty * over_two_sundays)
     
     if params['s4_on']:
+        # 「希望は絶対？」がFalseの休日希望（＝準希望休）を特定
+        weak_holiday_roles = {role for role, settings in symbol_settings.items() 
+                              if settings['振る舞い:休日扱い？'] and not settings['振る舞い:希望は絶対？']}
         for s, reqs in requests_map.items():
-            for d, req_type in reqs.items():
-                if req_type == '△':
+            for d, role in reqs.items():
+                if role in weak_holiday_roles:
+                    # 準希望休なのに出勤(1)になっていたらペナルティ
                     penalties.append(params['s4_penalty'] * shifts[(s, d)])
 
     if params['s0_on'] or params['s2_on']:
@@ -385,16 +452,28 @@ def solve_shift_model(params):
             if calendar.weekday(year, month, d) == 5 or d == num_days: weeks_in_month.append(current_week); current_week = []
         params['weeks_in_month'] = weeks_in_month
         
+        # 記号設定から休日の役割を特定
+        full_holiday_roles = {role for role, settings in symbol_settings.items() if settings['振る舞い:休日扱い？'] and settings['振る舞い:勤務係数'] == 0.0}
+        half_holiday_roles = {role for role, settings in symbol_settings.items() if settings['振る舞い:休日扱い？'] and settings['振る舞い:勤務係数'] > 0.0}
+
         for s_idx, s in enumerate(staff):
             if s in params['part_time_staff_ids']: continue
             s_reqs = requests_map.get(s, {})
-            all_full_requests = {d for d, r in s_reqs.items() if r in ['×', '有', '特', '夏', '△']}
-            all_half_day_requests = {d for d, r in s_reqs.items() if r in ['AM有', 'PM有', 'AM休', 'PM休']}
+            
+            # スタッフの希望休（全休）日を特定
+            all_full_requests = {d for d, r in s_reqs.items() if r in full_holiday_roles}
+            # スタッフの希望休（半休）日を特定
+            all_half_day_requests = {d for d, r in s_reqs.items() if r in half_holiday_roles}
 
             for w_idx, week in enumerate(weeks_in_month):
+                # 週に全休希望が3日以上あれば、その週の週休チェックはスキップ
                 if sum(1 for d in week if d in all_full_requests) >= 3: continue
+
+                # ソルバーが割り当てた休み + 希望休（全休）
                 num_full_holidays_in_week = sum(1 - shifts[(s, d)] for d in week)
+                # 希望休（半休）で出勤扱いになった日数
                 num_half_holidays_in_week = sum(shifts[(s, d)] for d in week if d in all_half_day_requests)
+                
                 total_holiday_value = model.NewIntVar(0, 28, f'thv_s{s_idx}_w{w_idx}')
                 model.Add(total_holiday_value == 2 * num_full_holidays_in_week + num_half_holidays_in_week)
 
@@ -441,13 +520,16 @@ def solve_shift_model(params):
         event_units = params['event_units']
         unit_multiplier_map = params['unit_multiplier_map'] # 追加
 
+        # 記号設定から休日役割を特定
+        holiday_roles = {role for role, settings in symbol_settings.items() if settings['振る舞い:休日扱い？']}
+
         total_weekday_units_by_job = {}
         for job, members in job_types.items():
             if not members: total_weekday_units_by_job[job] = 0; continue
             # 休日希望日を考慮した総単位数を計算 (より正確に)
             total_units = sum(
                 int(staff_info[s]['1日の単位数']) * 
-                (1 - sum(1 for d in weekdays if requests_map.get(s, {}).get(d) in ['有','特','夏','×','△']) / len(weekdays)) 
+                (1 - sum(1 for d in weekdays if requests_map.get(s, {}).get(d) in holiday_roles) / len(weekdays)) 
                 for s in members
             )
             total_weekday_units_by_job[job] = total_units
@@ -497,18 +579,19 @@ def solve_shift_model(params):
     
     if status == cp_model.OPTIMAL or status == cp_model.FEASIBLE:
         shifts_values = {(s, d): solver.Value(shifts[(s, d)]) for s in staff for d in days}
-        # --- ペナルティ詳細の収集 ---
+        # --- ペナルティ詳細の収集 (新方式) ---
         # H1: 月間休日数
         if params['h1_on']:
+            full_holiday_roles = {role for role, settings in symbol_settings.items() if settings['振る舞い:休日扱い？'] and settings['振る舞い:勤務係数'] == 0.0}
+            half_holiday_roles = {role for role, settings in symbol_settings.items() if settings['振る舞い:休日扱い？'] and settings['振る舞い:勤務係数'] > 0.0}
             for s in staff:
                 if s in params['part_time_staff_ids']: continue
-                num_paid_leave = sum(1 for r in requests_map.get(s, {}).values() if r == '有')
-                num_special_leave = sum(1 for r in requests_map.get(s, {}).values() if r == '特')
-                num_summer_leave = sum(1 for r in requests_map.get(s, {}).values() if r == '夏')
-                num_half_kokyu = sum(1 for r in requests_map.get(s, {}).values() if r in ['AM休', 'PM休'])
+                s_reqs = requests_map.get(s, {})
+                num_full_holidays_req = sum(1 for role in s_reqs.values() if role in full_holiday_roles)
+                num_half_holidays_req = sum(1 for role in s_reqs.values() if role in half_holiday_roles)
                 full_holidays_total = sum(1 - shifts_values.get((s, d), 0) for d in days)
-                full_holidays_kokyu = full_holidays_total - num_paid_leave - num_special_leave - num_summer_leave
-                total_holiday_value = 2 * full_holidays_kokyu + num_half_kokyu
+                full_holidays_kokyu = full_holidays_total - num_full_holidays_req
+                total_holiday_value = 2 * full_holidays_kokyu + num_half_holidays_req
                 if total_holiday_value != 18:
                     penalty_details.append({
                         'rule': 'H1: 月間休日数',
@@ -520,27 +603,32 @@ def solve_shift_model(params):
 
         # H2: 希望休/有休
         if params['h2_on']:
+            absolute_roles = {role for role, settings in symbol_settings.items() if settings['振る舞い:希望は絶対？']}
             for s, reqs in requests_map.items():
-                for d, req_type in reqs.items():
-                    is_working = shifts_values.get((s, d), 0) == 1
-                    # 希望が休み（×, 有, 特, 夏）なのに出勤になっている
-                    if req_type in ['×', '有', '特', '夏'] and is_working:
-                        penalty_details.append({
-                            'rule': 'H2: 希望休違反',
-                            'staff': staff_info[s]['職員名'],
-                            'day': d,
-                            'highlight_days': [d],
-                            'detail': f"{d}日の「{req_type}」希望に反して出勤になっています。"
-                        })
-                    # 希望が出勤（○, AM/PM有, AM/PM休, etc.）なのに休みになっている
-                    elif req_type in ['○', 'AM有', 'PM有', 'AM休', 'PM休', '出張', '前2h有', '後2h有'] and not is_working:
-                         penalty_details.append({
-                            'rule': 'H2: 希望休違反',
-                            'staff': staff_info[s]['職員名'],
-                            'day': d,
-                            'highlight_days': [d],
-                            'detail': f"{d}日の「{req_type}」希望に反して休みになっています。"
-                        })
+                for d, role in reqs.items():
+                    if role in absolute_roles:
+                        is_holiday_role = symbol_settings[role]['振る舞い:休日扱い？']
+                        is_working = shifts_values.get((s, d), 0) == 1
+                        output_symbol = symbol_settings[role].get('出力される記号', '')
+                        
+                        # 休日希望なのに出勤になっている
+                        if is_holiday_role and is_working:
+                            penalty_details.append({
+                                'rule': 'H2: 希望休違反',
+                                'staff': staff_info[s]['職員名'],
+                                'day': d,
+                                'highlight_days': [d],
+                                'detail': f"{d}日の「{output_symbol}」希望に反して出勤になっています。"
+                            })
+                        # 勤務希望なのに休みになっている
+                        elif not is_holiday_role and not is_working:
+                            penalty_details.append({
+                                'rule': 'H2: 希望休違反',
+                                'staff': staff_info[s]['職員名'],
+                                'day': d,
+                                'highlight_days': [d],
+                                'detail': f"{d}日の「{output_symbol}」希望に反して休みになっています。"
+                            })
         
         # H3: 役職者配置
         if params['h3_on']:
@@ -573,10 +661,12 @@ def solve_shift_model(params):
 
         # S0/S2: 週休確保
         if params['s0_on'] or params['s2_on']:
+            full_holiday_roles = {role for role, settings in symbol_settings.items() if settings['振る舞い:休日扱い？'] and settings['振る舞い:勤務係数'] == 0.0}
+            half_holiday_roles = {role for role, settings in symbol_settings.items() if settings['振る舞い:休日扱い？'] and settings['振る舞い:勤務係数'] > 0.0}
             for s_idx, s in enumerate(staff):
                 if s in params['part_time_staff_ids']: continue
                 s_reqs = requests_map.get(s, {})
-                all_half_day_requests_staff = {d for d, r in s_reqs.items() if r in ['AM有', 'PM有', 'AM休', 'PM休']}
+                all_half_day_requests_staff = {d for d, r in s_reqs.items() if r in half_holiday_roles}
                 for w_idx, week in enumerate(params['weeks_in_month']):
                     num_full_holidays_in_week = sum(1 - shifts_values.get((s, d), 0) for d in week)
                     num_half_holidays_in_week = sum(1 for d in week if d in all_half_day_requests_staff and shifts_values.get((s,d),0) == 1)
@@ -648,8 +738,8 @@ def solve_shift_model(params):
                         'detail': f"{d}日に回復期担当のOTが出勤していません。"
                     })
 
-        schedule_df = _create_schedule_df(shifts_values, staff, days, params['staff_df'], requests_map, year, month)
-        summary_df = _create_summary(schedule_df, staff_info, year, month, params['event_units'], params['unit_multiplier_map'])
+        schedule_df = _create_schedule_df(shifts_values, staff, days, params['staff_df'], requests_map, year, month, symbol_settings)
+        summary_df = _create_summary(schedule_df, staff_info, year, month, params['event_units'], params['unit_multiplier_map'], symbol_settings)
         message = f"求解ステータス: **{solver.StatusName(status)}** (ペナルティ合計: **{round(solver.ObjectiveValue())}**)"
         return True, schedule_df, summary_df, message, penalty_details
     else:
@@ -870,6 +960,13 @@ if create_button:
         requests_worksheet = spreadsheet.worksheet("希望休一覧")
         requests_df = get_as_dataframe(requests_worksheet, dtype={'職員番号': str})
         requests_df.dropna(how='all', inplace=True)
+
+        st.info("🔄 スプレッドシートから記号設定を読み込んでいます...")
+        symbol_settings = get_symbol_settings(spreadsheet)
+        if symbol_settings is None:
+            st.error("記号設定を読み込めませんでした。処理を中断します。")
+            st.stop()
+
         st.success("✅ データの読み込みが完了しました。")
 
         params = {}
@@ -878,6 +975,7 @@ if create_button:
         params['requests_df'] = requests_df
         params['year'] = year; params['month'] = month
         params['tolerance'] = tolerance; params['event_units'] = event_units_input
+        params['symbol_settings'] = symbol_settings # ★ 新規追加
         
         params['is_saturday_special'] = is_saturday_special
         params['targets'] = {
