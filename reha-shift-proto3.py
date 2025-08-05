@@ -318,18 +318,22 @@ def solve_shift_model(params):
     penalty_details = []
 
     if params['h1_on']:
-        full_holiday_roles = {role for role, settings in symbol_settings.items() if settings['振る舞い:休日扱い？'] and settings['振る舞い:勤務係数'] == 0.0}
         half_holiday_roles = {role for role, settings in symbol_settings.items() if settings['振る舞い:休日扱い？'] and settings['振る舞い:勤務係数'] > 0.0}
         for s_idx, s in enumerate(staff):
             if s in params['part_time_staff_ids']: continue
             s_reqs = requests_map.get(s, {})
-            num_full_holidays_req = sum(1 for role in s_reqs.values() if role in full_holiday_roles)
+            
+            # 半休希望の日数をカウント
             num_half_holidays_req = sum(1 for role in s_reqs.values() if role in half_holiday_roles)
-            full_holidays_total = sum(1 - shifts[(s, d)] for d in days)
-            full_holidays_kokyu = model.NewIntVar(0, num_days, f'full_kokyu_{s}')
-            model.Add(full_holidays_kokyu == full_holidays_total - num_full_holidays_req)
+            
+            # 全ての全休の日数（希望休＋公休）を計算
+            total_full_holidays = sum(1 - shifts[(s, d)] for d in days)
+            
+            # 休日価値を計算（全休=2, 半休=1）
             total_holiday_value = model.NewIntVar(0, num_days * 2, f'total_holiday_value_{s}')
-            model.Add(total_holiday_value == 2 * full_holidays_kokyu + num_half_holidays_req)
+            model.Add(total_holiday_value == 2 * total_full_holidays + num_half_holidays_req)
+            
+            # 目標値（18）との差分に対するペナルティを計算
             deviation = model.NewIntVar(-num_days * 2, num_days * 2, f'h1_dev_{s}')
             model.Add(deviation == total_holiday_value - 18)
             abs_deviation = model.NewIntVar(0, num_days * 2, f'h1_abs_dev_{s}')
@@ -337,19 +341,27 @@ def solve_shift_model(params):
             penalties.append(params['h1_penalty'] * abs_deviation)
 
     if params['h2_on']:
+        # --- パートタイマーの勤務を固定 ---
+        for s in params['part_time_staff_ids']:
+            s_reqs = requests_map.get(s, {})
+            for d, role in s_reqs.items():
+                is_holiday_role = symbol_settings[role]['振る舞い:休日扱い？']
+                if is_holiday_role:
+                    model.Add(shifts[(s, d)] == 0) # 休みを強制
+                else:
+                    model.Add(shifts[(s, d)] == 1) # 勤務を強制
+
+        # --- フルタイマーの希望休にペナルティを適用 ---
         absolute_roles = {role for role, settings in symbol_settings.items() if settings['振る舞い:希望は絶対？']}
         for s, reqs in requests_map.items():
+            if s in params['part_time_staff_ids']: continue # パートは上で処理済み
             for d, role in reqs.items():
                 if role in absolute_roles:
                     is_holiday_role = symbol_settings[role]['振る舞い:休日扱い？']
-                    if s in params['part_time_staff_ids']:
-                        if is_holiday_role:
-                            model.Add(shifts[(s, d)] == 0)
+                    if is_holiday_role:
+                        penalties.append(params['h2_penalty'] * shifts[(s, d)])
                     else:
-                        if is_holiday_role:
-                            penalties.append(params['h2_penalty'] * shifts[(s, d)])
-                        else:
-                            penalties.append(params['h2_penalty'] * (1 - shifts[(s, d)]))
+                        penalties.append(params['h2_penalty'] * (1 - shifts[(s, d)]))
 
     if params['h3_on']:
         for d in days:
