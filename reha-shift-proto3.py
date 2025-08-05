@@ -101,8 +101,12 @@ def get_symbol_settings(_spreadsheet):
         df['振る舞い:休日扱い？'] = df['振る舞い:休日扱い？'].astype(str).str.lower().isin(['true', 'yes', 'はい', '1'])
         df['振る舞い:希望は絶対？'] = df['振る舞い:希望は絶対？'].astype(str).str.lower().isin(['true', 'yes', 'はい', '1'])
         df['振る舞い:勤務係数'] = pd.to_numeric(df['振る舞い:勤務係数'], errors='coerce').fillna(1.0)
-        df['入力で使う記号'] = df['入力で使う記号'].astype(str).apply(lambda x: [s.strip() for s in x.split(',') if s.strip()] if pd.notna(x) else [])
+        df['入力で使う記号'] = df['入力で使う記号 (複数可)'].astype(str).apply(lambda x: [s.strip() for s in x.split(',') if s.strip()] if pd.notna(x) else [])
         df['出力される記号'] = df['出力される記号'].fillna('')
+        
+        # 後続処理のために、元の列は削除してキー名をシンプルに保つ
+        df = df.drop(columns=['入力で使う記号 (複数可)'])
+
         settings_dict = df.set_index('役割').to_dict('index')
         return settings_dict
     except gspread.exceptions.WorksheetNotFound:
