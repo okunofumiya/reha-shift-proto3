@@ -602,17 +602,18 @@ def solve_shift_model(params):
     if status == cp_model.OPTIMAL or status == cp_model.FEASIBLE:
         shifts_values = {(s, d): solver.Value(shifts[(s, d)]) for s in staff for d in days}
         
+        # --- ペナルティ詳細の収集 (H1ルールをソルバーのロジックと完全に一致させる) ---
         if params['h1_on']:
-            full_holiday_roles = {role for role, settings in symbol_settings.items() if settings['振る舞い:休日扱い？'] and settings['振る舞い:勤務係数'] == 0.0}
-            half_holiday_roles = {role for role, settings in symbol_settings.items() if settings['振る舞い:休日扱い？'] and settings['振る舞い:勤務係数'] > 0.0}
+            non_countable_holiday_roles = {'HOLIDAY_PAID', 'HOLIDAY_SPECIAL', 'HOLIDAY_SUMMER'}
+            half_holiday_roles = {role for role, settings in symbol_settings.items() if settings['振る舞い:休日扱い？'] and 0 < settings['振る舞い:勤務係数'] < 1.0}
             for s in staff:
                 if s in params['part_time_staff_ids']: continue
                 s_reqs = requests_map.get(s, {})
-                num_full_holidays_req = sum(1 for role in s_reqs.values() if role in full_holiday_roles)
-                num_half_holidays_req = sum(1 for role in s_reqs.values() if role in half_holiday_roles)
-                full_holidays_total = sum(1 - shifts_values.get((s, d), 0) for d in days)
-                full_holidays_kokyu = full_holidays_total - num_full_holidays_req
-                total_holiday_value = 2 * full_holidays_kokyu + num_half_holidays_req
+                num_non_countable_holidays = sum(1 for role in s_reqs.values() if role in non_countable_holiday_roles)
+                num_half_holidays = sum(1 for role in s_reqs.values() if role in half_holiday_roles)
+                total_full_holidays_by_solver = sum(1 - shifts_values.get((s, d), 0) for d in days)
+                countable_full_holidays = total_full_holidays_by_solver - num_non_countable_holidays
+                total_holiday_value = 2 * countable_full_holidays + num_half_holidays
                 if total_holiday_value != 18:
                     detail_text = "休日が{}日分しか確保できませんでした（目標: 9日分）。".format(total_holiday_value / 2)
                     penalty_details.append({'rule': 'H1: 月間休日数', 'staff': staff_info[s]['職員名'], 'day': '-', 'highlight_days': [], 'detail': detail_text})
