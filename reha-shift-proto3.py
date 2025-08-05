@@ -514,6 +514,7 @@ def solve_shift_model(params):
                         'rule': 'H1: 月間休日数',
                         'staff': staff_info[s]['職員名'],
                         'day': '-',
+                        'highlight_days': [],
                         'detail': f"休日が{total_holiday_value / 2}日分しか確保できませんでした（目標: 9日分）。"
                     })
 
@@ -528,6 +529,7 @@ def solve_shift_model(params):
                             'rule': 'H2: 希望休違反',
                             'staff': staff_info[s]['職員名'],
                             'day': d,
+                            'highlight_days': [d],
                             'detail': f"{d}日の「{req_type}」希望に反して出勤になっています。"
                         })
                     # 希望が出勤（○, AM/PM有, AM/PM休, etc.）なのに休みになっている
@@ -536,6 +538,7 @@ def solve_shift_model(params):
                             'rule': 'H2: 希望休違反',
                             'staff': staff_info[s]['職員名'],
                             'day': d,
+                            'highlight_days': [d],
                             'detail': f"{d}日の「{req_type}」希望に反して休みになっています。"
                         })
         
@@ -548,6 +551,7 @@ def solve_shift_model(params):
                         'rule': 'H3: 役職者未配置',
                         'staff': '-',
                         'day': d,
+                        'highlight_days': [d],
                         'detail': f"{d}日に役職者が出勤していません。"
                     })
 
@@ -563,6 +567,7 @@ def solve_shift_model(params):
                             'rule': 'H5: 日曜出勤上限超過',
                             'staff': staff_info[s]['職員名'],
                             'day': '-',
+                            'highlight_days': [],
                             'detail': f"日曜日の出勤が{num_sundays_worked}回となり、上限（{sunday_limit}回）を超えています。"
                         })
 
@@ -587,6 +592,7 @@ def solve_shift_model(params):
                                 'rule': 'S0: 週休未確保（月またぎ週）',
                                 'staff': staff_info[s]['職員名'],
                                 'day': '-',
+                                'highlight_days': week,
                                 'detail': f"前月最終週と今月第1週 ({week_str}) を合わせた休日が{cross_month_total_value/2}日分しか確保できていません（目標: 1.5日分）。"
                             })
                     # 通常の週
@@ -597,6 +603,7 @@ def solve_shift_model(params):
                                 'rule': 'S0: 週休未確保（完全週）',
                                 'staff': staff_info[s]['職員名'],
                                 'day': '-',
+                                'highlight_days': week,
                                 'detail': f"第{w_idx+1}週 ({week_str}) の休日が{total_holiday_value/2}日分しか確保できていません（目標: 1.5日分）。"
                             })
                         # S2: 不完全週
@@ -615,6 +622,7 @@ def solve_shift_model(params):
                             'rule': 'S7: 連続勤務日数超過',
                             'staff': staff_info[s]['職員名'],
                             'day': f'{d}日～{d + max_consecutive_days}日',
+                            'highlight_days': list(range(d, d + max_consecutive_days + 1)),
                             'detail': f'{max_consecutive_days + 1}日間の連続勤務が発生しています。'
                         })
 
@@ -628,6 +636,7 @@ def solve_shift_model(params):
                         'rule': 'S5: 回復期担当未配置',
                         'staff': '-',
                         'day': d,
+                        'highlight_days': [d],
                         'detail': f"{d}日に回復期担当のPTが出勤していません。"
                     })
                 if kaifukuki_ot_on == 0:
@@ -635,6 +644,7 @@ def solve_shift_model(params):
                         'rule': 'S5: 回復期担当未配置',
                         'staff': '-',
                         'day': d,
+                        'highlight_days': [d],
                         'detail': f"{d}日に回復期担当のOTが出勤していません。"
                     })
 
@@ -931,25 +941,14 @@ if create_button:
                     df.loc[:,:] = '' # デフォルトはスタイルなし
 
                     for p in penalty_details:
-                        day_col_tuples = [] # 複数の日をハイライトするためにリスト化
-                        if p['day'] != '-':
-                            try:
-                                # 単一日付の場合
-                                day_col = int(p['day'])
-                                weekday_str = weekdays_header[day_col - 1]
-                                day_col_tuples.append((day_col, weekday_str))
-                            except (ValueError, TypeError):
-                                # '12日～17日' のような範囲指定の場合
-                                if isinstance(p['day'], str) and '～' in p['day']:
-                                    try:
-                                        start_day_str, end_day_str = p['day'].split('～')
-                                        start_day = int(start_day_str.replace('日', ''))
-                                        end_day = int(end_day_str.replace('日', ''))
-                                        for day in range(start_day, end_day + 1):
-                                            weekday_str = weekdays_header[day - 1]
-                                            day_col_tuples.append((day, weekday_str))
-                                    except (ValueError, IndexError):
-                                        pass # パース失敗時はハイライトしない
+                        day_col_tuples = []
+                        if p.get('highlight_days'):
+                            for day in p['highlight_days']:
+                                try:
+                                    weekday_str = weekdays_header[day - 1]
+                                    day_col_tuples.append((day, weekday_str))
+                                except IndexError:
+                                    pass # 日付が範囲外の場合は無視
 
                         # 職員が特定されているペナルティ
                         if p['staff'] != '-':
@@ -960,7 +959,7 @@ if create_button:
                                     for day_col_tuple in day_col_tuples:
                                         if day_col_tuple in df.columns:
                                             df.loc[row_idx, day_col_tuple] = 'background-color: #ffcccc'
-                                else: # 職員全体にかかるペナルティ
+                                else: # 職員全体にかかるペナルティ (H1, H5など)
                                     df.loc[row_idx, ('職員情報', '職員名')] = 'background-color: #ffcccc'
                         
                         # 職員が特定されていないペナルティ (日付単位)
@@ -975,7 +974,6 @@ if create_button:
                                 summary_rows = data[data[('職員情報', '職員名')] == target_summary_row_name].index
                                 if not summary_rows.empty:
                                     row_idx = summary_rows[0]
-                                    # 日付単位のペナルティは範囲を想定していないが、念のためループ
                                     for day_col_tuple in day_col_tuples:
                                         if day_col_tuple in df.columns:
                                             df.loc[row_idx, day_col_tuple] = 'background-color: #ffcccc'
