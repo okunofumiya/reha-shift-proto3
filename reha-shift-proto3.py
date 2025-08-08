@@ -337,10 +337,16 @@ def solve_shift_model(params):
 
     for s in staff:
         if s in params['part_time_staff_ids']: continue
+        # 上限設定
         sun_sat_limit = pd.to_numeric(staff_info[s].get('土日上限'), errors='coerce')
         sun_limit = pd.to_numeric(staff_info[s].get('日曜上限'), errors='coerce')
         sat_limit = pd.to_numeric(staff_info[s].get('土曜上限'), errors='coerce')
+        # 下限設定 (新規追加)
+        sun_sat_lower_limit = pd.to_numeric(staff_info[s].get('土日下限'), errors='coerce')
+        sun_lower_limit = pd.to_numeric(staff_info[s].get('日曜下限'), errors='coerce')
+        sat_lower_limit = pd.to_numeric(staff_info[s].get('土曜下限'), errors='coerce')
 
+        # --- 上限制約 ---
         if pd.notna(sun_sat_limit):
             num_sun_sat_worked = sum(shifts[(s, d)] for d in sundays + special_saturdays)
             over_limit = model.NewIntVar(0, len(sundays) + len(special_saturdays), f'sun_sat_over_{s}')
@@ -361,6 +367,28 @@ def solve_shift_model(params):
                 model.Add(over_limit >= num_saturdays_worked - int(sat_limit))
                 model.Add(over_limit >= 0)
                 penalties.append(params['h_weekend_limit_penalty'] * over_limit)
+
+        # --- 下限制約 (新規追加) ---
+        if pd.notna(sun_sat_lower_limit) and sun_sat_lower_limit > 0:
+            num_sun_sat_worked = sum(shifts[(s, d)] for d in sundays + special_saturdays)
+            under_limit = model.NewIntVar(0, len(sundays) + len(special_saturdays), f'sun_sat_under_{s}')
+            model.Add(under_limit >= int(sun_sat_lower_limit) - num_sun_sat_worked)
+            model.Add(under_limit >= 0)
+            penalties.append(params['h_weekend_limit_penalty'] * under_limit)
+        else:
+            if pd.notna(sun_lower_limit) and sun_lower_limit > 0:
+                num_sundays_worked = sum(shifts[(s, d)] for d in sundays)
+                under_limit = model.NewIntVar(0, len(sundays), f'sunday_under_{s}')
+                model.Add(under_limit >= int(sun_lower_limit) - num_sundays_worked)
+                model.Add(under_limit >= 0)
+                penalties.append(params['h_weekend_limit_penalty'] * under_limit)
+
+            if pd.notna(sat_lower_limit) and sat_lower_limit > 0 and special_saturdays:
+                num_saturdays_worked = sum(shifts[(s, d)] for d in special_saturdays)
+                under_limit = model.NewIntVar(0, len(special_saturdays), f'saturday_under_{s}')
+                model.Add(under_limit >= int(sat_lower_limit) - num_saturdays_worked)
+                model.Add(under_limit >= 0)
+                penalties.append(params['h_weekend_limit_penalty'] * under_limit)
 
     sunday_overwork_penalty = 50 
     for s in staff:
@@ -570,6 +598,45 @@ def solve_shift_model(params):
                             'highlight_days': [],
                             'detail': f"日曜日の出勤が{num_sundays_worked}回となり、上限（{sunday_limit}回）を超えています。"
                         })
+
+        # H6: 週末出勤下限（新規追加）
+        # このルール番号H6は仮です。必要に応じて変更してください。
+        for s in staff:
+            if s in params['part_time_staff_ids']: continue
+            
+            sun_sat_lower_limit = pd.to_numeric(staff_info[s].get('土日下限'), errors='coerce')
+            sun_lower_limit = pd.to_numeric(staff_info[s].get('日曜下限'), errors='coerce')
+            sat_lower_limit = pd.to_numeric(staff_info[s].get('土曜下限'), errors='coerce')
+
+            num_sundays_worked = sum(shifts_values.get((s, d), 0) for d in sundays)
+            num_saturdays_worked = sum(shifts_values.get((s, d), 0) for d in special_saturdays)
+            num_sun_sat_worked = num_sundays_worked + num_saturdays_worked
+
+            if pd.notna(sun_sat_lower_limit) and sun_sat_lower_limit > 0 and num_sun_sat_worked < sun_sat_lower_limit:
+                penalty_details.append({
+                    'rule': 'H6: 週末出勤下限未達',
+                    'staff': staff_info[s]['職員名'],
+                    'day': '-',
+                    'highlight_days': [],
+                    'detail': f"土日の合計出勤が{num_sun_sat_worked}回となり、下限（{int(sun_sat_lower_limit)}回）に達していません。"
+                })
+            else:
+                if pd.notna(sun_lower_limit) and sun_lower_limit > 0 and num_sundays_worked < sun_lower_limit:
+                    penalty_details.append({
+                        'rule': 'H6: 日曜出勤下限未達',
+                        'staff': staff_info[s]['職員名'],
+                        'day': '-',
+                        'highlight_days': [],
+                        'detail': f"日曜日の出勤が{num_sundays_worked}回となり、下限（{int(sun_lower_limit)}回）に達していません。"
+                    })
+                if pd.notna(sat_lower_limit) and sat_lower_limit > 0 and special_saturdays and num_saturdays_worked < sat_lower_limit:
+                    penalty_details.append({
+                        'rule': 'H6: 土曜出勤下限未達',
+                        'staff': staff_info[s]['職員名'],
+                        'day': '-',
+                        'highlight_days': [],
+                        'detail': f"土曜日の出勤が{num_saturdays_worked}回となり、下限（{int(sat_lower_limit)}回）に達していません。"
+                    })
 
         # S0/S2: 週休確保
         if params['s0_on'] or params['s2_on']:
@@ -804,7 +871,7 @@ with st.expander("▼ ルール検証モード（上級者向け）"):
     
     h_cols_new = st.columns(1)
     with h_cols_new[0]:
-        params_ui['h_weekend_limit_penalty'] = st.number_input("土日上限/土曜上限/日曜上限 Penalty", value=st.session_state.get('h_weekend_limit_penalty', 1000), key='h_weekend_limit_penalty')
+        params_ui['h_weekend_limit_penalty'] = st.number_input("土日上限/下限 Penalty", value=st.session_state.get('h_weekend_limit_penalty', 1000), key='h_weekend_limit_penalty', help="スプレッドシートで設定した職員ごとの土日出勤回数の上限/下限に関するペナルティです。")
     
     params_ui['h4_on'] = False
     st.markdown("---")
