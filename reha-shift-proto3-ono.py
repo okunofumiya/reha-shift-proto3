@@ -528,8 +528,12 @@ def solve_shift_model(params):
                 penalties.append(params['s7_penalty'] * is_over)
 
     model.Minimize(sum(penalties))
-    solver = cp_model.CpSolver(); solver.parameters.max_time_in_seconds = 60.0; status = solver.Solve(model)
-    
+    solver = cp_model.CpSolver()
+    # ★ここから追加
+    import random
+    solver.parameters.random_seed = random.randint(0, 2**30)
+    # ★ここまで追加
+    solver.parameters.max_time_in_seconds = 60.0; status = solver.Solve(model)
     if status == cp_model.OPTIMAL or status == cp_model.FEASIBLE:
         shifts_values = {(s, d): solver.Value(shifts[(s, d)]) for s in staff for d in days}
         # --- ペナルティ詳細の収集 ---
