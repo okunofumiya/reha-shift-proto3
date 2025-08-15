@@ -331,7 +331,6 @@ def improve_schedule_with_local_search(shifts_values, params):
                 break 
         else: # for-else: ループがbreakされずに完了した場合
             st.warning(f"--- 最大反復回数({max_iterations})に達しました。アルゴリズムを終了します。 ---")
-            break
 
 
 # --- 第2部: ペナルティ計算関数 ---
