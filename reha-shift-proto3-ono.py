@@ -267,69 +267,76 @@ def is_move_valid(temp_shifts_values, staff_id, max_day, min_day, params):
     return True
 
 def improve_schedule_with_local_search(shifts_values, params):
-    """山登り法で平日均等化改善を行う"""
+    """【週単位改善版】山登り法で平日均等化改善を行う"""
     debug_container = st.expander("山登り法 改善プロセス（デバッグ情報）")
     with debug_container:
-        st.write("--- 改善アルゴリズム開始 ---")
+        st.write("--- 改善アルゴリズム開始（週単位探索） ---")
         max_iterations = 100 # 無限ループ防止
         for i in range(max_iterations):
             improvement_found_in_pass = False
-            
             current_best_score = calculate_internal_penalty_score(shifts_values, params)
             st.write(f"**パス {i+1} 開始** | 現在の平準化スコア(標準偏差の合計): `{current_best_score:.4f}`")
 
-            for job in ['PT', 'OT', 'ST']:
-                members = params['job_types'].get(job, [])
-                if not members: continue
+            # 週ごとにループ
+            for week_idx, week in enumerate(params['weeks_in_month']):
+                week_weekdays = [d for d in week if d in params['weekdays']]
+                if len(week_weekdays) < 2: continue
 
-                daily_counts = {d: sum(shifts_values.get((s, d), 0) for s in members) for d in params['weekdays']}
-                if not daily_counts: continue
+                st.write(f"**第{week_idx+1}週 ({week[0]}日～{week[-1]}日) をチェック中...**")
 
-                max_day = max(daily_counts, key=daily_counts.get)
-                min_day = min(daily_counts, key=daily_counts.get)
+                # 職種ごとにループ
+                for job in ['PT', 'OT', 'ST']:
+                    members = params['job_types'].get(job, [])
+                    if not members: continue
 
-                st.write(f"*{job}* | 最多日: `{max_day}日` ({daily_counts[max_day]}人), 最少日: `{min_day}日` ({daily_counts[min_day]}人)")
+                    daily_counts = {d: sum(shifts_values.get((s, d), 0) for s in members) for d in week_weekdays}
+                    if not daily_counts: continue
 
-                if daily_counts[max_day] <= daily_counts[min_day] + 1:
-                    continue
+                    max_day = max(daily_counts, key=daily_counts.get)
+                    min_day = min(daily_counts, key=daily_counts.get)
 
-                # 改善候補の職員を探す
-                for staff_id in members:
-                    is_working_on_max = shifts_values.get((staff_id, max_day), 0) == 1
-                    is_off_on_min = shifts_values.get((staff_id, min_day), 0) == 0
-                    request_on_min = params['requests_map'].get(staff_id, {}).get(min_day)
+                    if daily_counts[max_day] <= daily_counts[min_day] + 1:
+                        continue
+                    
+                    st.write(f"  *{job}* | 週内最多日: `{max_day}日` ({daily_counts[max_day]}人), 週内最少日: `{min_day}日` ({daily_counts[min_day]}人)")
 
-                    if is_working_on_max and is_off_on_min and (request_on_min is None or request_on_min == '△'):
-                        staff_name = params['staff_info'][staff_id]['職員名']
-                        st.write(f"  → 候補: **{staff_name}** を `{max_day}日` から `{min_day}日` へ移動検討...")
+                    # 改善候補の職員を探す
+                    for staff_id in members:
+                        is_working_on_max = shifts_values.get((staff_id, max_day), 0) == 1
+                        is_off_on_min = shifts_values.get((staff_id, min_day), 0) == 0
+                        request_on_min = params['requests_map'].get(staff_id, {}).get(min_day)
 
-                        temp_shifts = shifts_values.copy()
-                        temp_shifts[(staff_id, max_day)] = 0
-                        temp_shifts[(staff_id, min_day)] = 1
+                        if is_working_on_max and is_off_on_min and (request_on_min is None or request_on_min == '△'):
+                            staff_name = params['staff_info'][staff_id]['職員名']
+                            st.write(f"    → 候補: **{staff_name}** を `{max_day}日` から `{min_day}日` へ移動検討...")
 
-                        if not is_move_valid(temp_shifts, staff_id, max_day, min_day, params):
-                            st.write("      <span style='color: orange;'>[移動不可]</span> ルール違反のためスキップ", unsafe_allow_html=True)
-                            continue
+                            temp_shifts = shifts_values.copy()
+                            temp_shifts[(staff_id, max_day)] = 0
+                            temp_shifts[(staff_id, min_day)] = 1
 
-                        move_cost = params.get('tri_penalty_weight', 0.5) if request_on_min == '△' else 0
-                        new_score = calculate_internal_penalty_score(temp_shifts, params)
+                            if not is_move_valid(temp_shifts, staff_id, max_day, min_day, params):
+                                st.write("      <span style='color: orange;'>[移動不可]</span> ルール違反のためスキップ", unsafe_allow_html=True)
+                                continue
 
-                        st.write(f"      新スコア: `{new_score:.4f}` + 移動コスト: `{move_cost}` = `{new_score + move_cost:.4f}`")
-                        if new_score + move_cost < current_best_score:
-                            st.write(f"      <span style='color: green;'>[改善実行]</span> スコアが `{current_best_score:.4f}` から改善", unsafe_allow_html=True)
-                            shifts_values.update(temp_shifts)
-                            improvement_found_in_pass = True
-                            break # 職員ループを抜けて、次の職種へ
+                            move_cost = params.get('tri_penalty_weight', 0.5) if request_on_min == '△' else 0
+                            new_score = calculate_internal_penalty_score(temp_shifts, params)
+
+                            st.write(f"      新スコア: `{new_score:.4f}` + 移動コスト: `{move_cost}` = `{new_score + move_cost:.4f}`")
+                            if new_score + move_cost < current_best_score:
+                                st.write(f"      <span style='color: green;'>[改善実行]</span> スコアが `{current_best_score:.4f}` から改善", unsafe_allow_html=True)
+                                shifts_values.update(temp_shifts)
+                                improvement_found_in_pass = True
+                                break # 職員ループを抜ける
+                    if improvement_found_in_pass:
+                        break # 職種ループを抜ける
                 if improvement_found_in_pass:
-                    break # 職種ループを抜けて、パスの最初から
+                    break # 週ループを抜ける
             
+            # 1パスで改善がなければループ終了
             if not improvement_found_in_pass:
-                if i == 0:
-                    st.write("--- 改善の余地なし。アルゴリズム終了 ---")
-                else:
-                    st.write(f"--- パス {i+1} で改善が見つからず。アルゴリズム終了 ---")
-                break 
-        else: # for-else: ループがbreakされずに完了した場合
+                st.write("--- 全ての週で改善の余地なし。アルゴリズム終了 ---")
+                break
+        else: # for-else: ループがbreakされずに完了した場合 (i.e. max_iterationsに達した場合)
             st.warning(f"--- 最大反復回数({max_iterations})に達しました。アルゴリズムを終了します。 ---")
 
 
