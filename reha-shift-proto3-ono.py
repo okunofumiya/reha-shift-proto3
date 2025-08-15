@@ -305,8 +305,10 @@ def improve_schedule_with_local_search(shifts_values, params):
                         is_working_on_max = shifts_values.get((staff_id, max_day), 0) == 1
                         is_off_on_min = shifts_values.get((staff_id, min_day), 0) == 0
                         request_on_min = params['requests_map'].get(staff_id, {}).get(min_day)
+                        request_on_max = params['requests_map'].get(staff_id, {}).get(max_day)
+                        must_work_symbols = ['○', 'AM休', 'PM休', 'AM有', 'PM有', '出張', '前2h有', '後2h有']
 
-                        if is_working_on_max and is_off_on_min and (request_on_min is None or request_on_min == '△'):
+                        if is_working_on_max and is_off_on_min and (request_on_min is None or request_on_min == '△') and (request_on_max not in must_work_symbols):
                             staff_name = params['staff_info'][staff_id]['職員名']
                             st.write(f"    → 候補: **{staff_name}** を `{max_day}日` から `{min_day}日` へ移動検討...")
 
