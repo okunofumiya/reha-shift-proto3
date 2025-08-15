@@ -316,7 +316,8 @@ def improve_schedule_with_local_search(shifts_values, params):
 
                         if new_score + move_cost < current_best_score:
                             staff_name = params['staff_info'][staff_id]['職員名']
-                            log_messages.append(f"✅ [改善 {len(log_messages)+1}] **{staff_name}**: `{max_day}日` → `{min_day}日` (スコア: {current_best_score:.4f} → {new_score:.4f})")
+                            move_type = "'△'希望" if request_on_min == '△' else "休日"
+                            log_messages.append(f"✅ [改善 {len(log_messages)+1}] **{staff_name}**: `{max_day}日` → `{min_day}日` ({move_type}) (スコア: {current_best_score:.4f} → {new_score:.4f})")
                             shifts_values.update(temp_shifts)
                             improvement_found_in_pass = True
                             break # 職員ループ
