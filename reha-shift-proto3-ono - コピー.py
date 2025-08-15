@@ -87,8 +87,7 @@ def gather_current_ui_settings():
         'h_weekend_limit_penalty',
         's0', 's0p', 's2', 's2p', 's3', 's3p', 's4', 's4p',
         's5', 's5p', 's6', 's6p', 's6ph', 'high_flat', 's7', 's7p',
-        's1a', 's1ap', 's1b', 's1bp', 's1c', 's1cp',
-        's6_improve' # 追加
+        's1a', 's1ap', 's1b', 's1bp', 's1c', 's1cp'
     ]
     for key in keys_to_save:
         if key in st.session_state:
@@ -733,36 +732,6 @@ def solve_shift_model(params):
                         'detail': f"{d}日に回復期担当のOTが出勤していません。"
                     })
 
-        # --- (オプション) 第2段階: 山登り法による改善 ---
-        improvement_message = ""
-        # 0/1形式のDataFrameを作成
-        base_schedule_for_improvement = pd.DataFrame(0, index=staff, columns=days, dtype=int)
-        for (s, d), v in shifts_values.items():
-            base_schedule_for_improvement.loc[s, d] = v
-
-        if params.get('s6_improve_on', False):
-            st.info("🔄 第2段階: 山登り法による業務負荷の平準化を開始します...")
-            
-            constraints_config = {
-                'max_consecutive_work_days': 5, # デフォルト値
-                'min_weekly_holidays': 2 # 固定値
-            }
-            penalty_config = { 's6_workload_penalty_weight': 1.0 }
-
-            improved_schedule_df, initial_score, final_score = improve_schedule_with_local_search(
-                base_schedule_for_improvement, constraints_config, penalty_config
-            )
-            
-            if final_score < initial_score:
-                improvement_message = f"山登り法により、業務負荷のばらつき(標準偏差)が **{initial_score:.2f}** から **{final_score:.2f}** に改善されました！"
-                # 改善後のスケジュールをshifts_valuesに反映し直す
-                for s in staff:
-                    for d in days:
-                        shifts_values[(s, d)] = int(improved_schedule_df.loc[s, d])
-            else:
-                improvement_message = "山登り法を試みましたが、これ以上の改善は見つかりませんでした。"
-            st.success(f"✅ {improvement_message}")
-
         schedule_df = _create_schedule_df(shifts_values, staff, days, params['staff_df'], requests_map, year, month)
         summary_df = _create_summary(schedule_df, staff_info, year, month, params['event_units'], params['unit_multiplier_map'])
         message = f"求解ステータス: **{solver.StatusName(status)}** (ペナルティ合計: **{round(solver.ObjectiveValue())}**)"
@@ -954,7 +923,6 @@ with st.expander("▼ ルール検証モード（上級者向け）"):
         params_ui['s7_penalty'] = st.number_input("S7 Penalty", value=st.session_state.get('s7p', 50), disabled=not params_ui['s7_on'], key='s7p')
     with s_cols2[3]:
         params_ui['high_flat_penalty'] = st.toggle('平準化ペナルティ強化', value=st.session_state.get('high_flat', False), key='high_flat', help="S6のペナルティを「標準P」ではなく「強化P」で計算します。")
-        params_ui['s6_improve_on'] = st.toggle('S6改善: 山登り法', value=st.session_state.get('s6_improve', True), key='s6_improve', help='第1段階の解を元に、山登り法で日々の業務負荷（出勤者数）の平準化を試みます。')
         
     st.markdown("##### S1: 日曜人数目標")
     s_cols3 = st.columns(3)
@@ -1121,157 +1089,3 @@ if create_button:
 
 st.markdown("---")
 st.markdown(f"<div style='text-align: right; color: grey;'>{APP_CREDIT} | Version: {APP_VERSION}</div>", unsafe_allow_html=True)
-
-
-# --- 第2段階改善アルゴリズム (山登り法) ---
-
-def calculate_total_penalty(schedule_df, penalty_config):
-    """
-    勤務表全体のペナルティスコアを計算する。
-    現時点では、S6（日ごとの出勤人数の標準偏差）のペナルティのみを計算する。
-    """
-    # S6: 業務負荷平準化ペナルティ (出勤人数の標準偏差)
-    daily_workload = schedule_df.sum(axis=0)
-    workload_std_dev = daily_workload.std()
-    
-    # ペナルティの重みを取得（なければ1.0）
-    penalty_weight = penalty_config.get('s6_workload_penalty_weight', 1.0)
-    
-    return workload_std_dev * penalty_weight
-
-def is_move_valid(schedule_df, staff_index, day1, day2, constraints_config):
-    """
-    ある職員の day1 と day2 の勤務を入れ替えても、制約違反にならないかを検証する。
-    - 週休ルール
-    - 連続勤務ルール
-    """
-    import itertools
-
-    # --- 設定値の取得 ---
-    max_consecutive_work_days = constraints_config.get('max_consecutive_work_days', 5)
-    min_weekly_holidays = constraints_config.get('min_weekly_holidays', 2)
-    num_days = len(schedule_df.columns)
-
-    # --- 仮のスケジュールを作成 ---
-    candidate_schedule = schedule_df.copy()
-    # day1は休み(0)に、day2は勤務(1)になる
-    candidate_schedule.loc[staff_index, day1] = 0
-    candidate_schedule.loc[staff_index, day2] = 1
-
-    # --- 1. 週休ルールの検証 ---
-    def check_weekly_holidays(schedule, staff, day, min_holidays):
-        # calendarモジュールに依存せず、7日区切りで週を定義する
-        # 1-7日, 8-14日, ...
-        week_num = (day - 1) // 7
-        week_start_day = week_num * 7 + 1
-        week_end_day = min(week_start_day + 6, num_days)
-        week_days = range(week_start_day, week_end_day + 1)
-        
-        required_holidays = min_holidays if len(week_days) == 7 else 1 # 不完全週は最低1日
-
-        holidays_in_week = (schedule.loc[staff, week_days] == 0).sum()
-        return holidays_in_week >= required_holidays
-
-    # day1が含まれる週をチェック
-    if not check_weekly_holidays(candidate_schedule, staff_index, day1, min_weekly_holidays):
-        return False
-    
-    # day1とday2が異なる週に属する場合は、day2の週もチェック
-    day1_week_num = (day1 - 1) // 7
-    day2_week_num = (day2 - 1) // 7
-    if day1_week_num != day2_week_num:
-        if not check_weekly_holidays(candidate_schedule, staff_index, day2, min_weekly_holidays):
-            return False
-
-    # --- 2. 連続勤務ルールの検証 ---
-    staff_row = candidate_schedule.loc[staff_index]
-    
-    # itertools.groupbyを使って連続する勤務(1)の長さをチェック
-    max_len = 0
-    for key, group in itertools.groupby(staff_row):
-        if key == 1:
-            max_len = max(max_len, len(list(group)))
-
-    if max_len > max_consecutive_work_days:
-        return False
-
-    # すべての検証をクリア
-    return True
-
-
-def improve_schedule_with_local_search(base_schedule_df, constraints_config, penalty_config):
-    """
-    山登り法に基づき、勤務表の業務負荷を平準化する。
-    """
-    current_schedule_df = base_schedule_df.copy()
-    
-    # 改善前のスコアを計算
-    initial_score = calculate_total_penalty(current_schedule_df, penalty_config)
-    current_best_score = initial_score
-
-    num_days = len(current_schedule_df.columns)
-    staff_list = current_schedule_df.index.tolist()
-    
-    iteration_limit = 100 # 無限ループを避けるためのカウンター
-    for i in range(iteration_limit):
-        improved_in_iteration = False
-        
-        # 全ての週に対して改善を試みる
-        num_weeks = (num_days + 6) // 7
-        for week_idx in range(num_weeks):
-            week_start = week_idx * 7 + 1
-            week_end = min(week_start + 6, num_days)
-            week_days = list(range(week_start, week_end + 1))
-
-            if len(week_days) <= 1:
-                continue
-
-            # その週の業務負荷（日ごとの出勤人数）を計算
-            daily_counts = current_schedule_df[week_days].sum(axis=0)
-            
-            # 最も負荷が高い日と低い日を見つける
-            min_day = daily_counts.idxmin()
-            max_day = daily_counts.idxmax()
-
-            # 負荷が同じならスキップ
-            if daily_counts[min_day] >= daily_counts[max_day]:
-                continue
-
-            # 入れ替え候補の職員を探す
-            # (max_dayに出勤していて、min_dayに休んでいる職員)
-            candidate_staff_filter = (current_schedule_df[max_day] == 1) & (current_schedule_df[min_day] == 0)
-            candidate_staff_list = current_schedule_df[candidate_staff_filter].index.tolist()
-            
-            # 候補者をランダムにシャッフルして、毎回同じ職員から試すのを防ぐ
-            import random
-            random.shuffle(candidate_staff_list)
-
-            for staff_index in candidate_staff_list:
-                # 入れ替えが制約上可能かチェック
-                if is_move_valid(current_schedule_df, staff_index, max_day, min_day, constraints_config):
-                    
-                    # 仮のスケジュールでスコアを計算
-                    candidate_schedule = current_schedule_df.copy()
-                    candidate_schedule.loc[staff_index, max_day] = 0
-                    candidate_schedule.loc[staff_index, min_day] = 1
-                    
-                    new_score = calculate_total_penalty(candidate_schedule, penalty_config)
-                    
-                    # スコアが改善されていれば、解を更新
-                    if new_score < current_best_score:
-                        current_schedule_df = candidate_schedule
-                        current_best_score = new_score
-                        improved_in_iteration = True
-                        
-                        # 1つ改善が見つかったら、週のループの最初に戻る
-                        break 
-            
-            if improved_in_iteration:
-                # 週ループを抜けて、whileループの最初から再探索
-                break
-        
-        # このイテレーションで改善がなければ終了
-        if not improved_in_iteration:
-            break
-    
-    return current_schedule_df, initial_score, current_best_score
