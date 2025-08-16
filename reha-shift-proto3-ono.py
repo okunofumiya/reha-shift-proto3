@@ -12,7 +12,7 @@ import json
 import random
 
 # ★★★ バージョン情報 ★★★
-APP_VERSION = "proto.3.1.0" # 山登り法ログ表示機能
+APP_VERSION = "proto.3.2.0" # 山登り法ロジック修正
 APP_CREDIT = "Okuno with 🤖 Gemini and Claude"
 
 # --- Gspread ヘルパー関数 ---
@@ -203,60 +203,56 @@ def calculate_final_penalties_and_details(shifts_values, params):
                 if sum(shifts_values.get((s,d+i),0) for i in range(max_consecutive_days+1))>max_consecutive_days: total_penalty_score+=params['s7_penalty']; penalty_details.append({'rule':'S7:連続勤務日数超過','staff':staff_info[s]['職員名'],'day':f'{d}日～{d+max_consecutive_days}日','highlight_days':list(range(d,d+max_consecutive_days+1)),'detail':f'{max_consecutive_days+1}日間の連続勤務が発生しています。'}); break
     return total_penalty_score,penalty_details
 
-def calculate_internal_penalty_score(shifts_values,params):
-    staff_info=params['staff_info']; unit_multiplier_map=params['unit_multiplier_map']; event_units=params['event_units']; ratios=params['ratios']; job_types=params['job_types']; weekdays=params['weekdays']
+def calculate_weekly_internal_score(shifts_values, week_days, params):
+    staff_info=params['staff_info']; unit_multiplier_map=params['unit_multiplier_map']; event_units=params['event_units']; ratios=params['ratios']; job_types=params['job_types']
     total_std_dev=0
     for job,members in job_types.items():
-        if not members or not weekdays: continue
+        if not members or not week_days: continue
         daily_residual_units=[]
-        for d in weekdays:
+        for d in week_days:
             provided_units=sum(int(staff_info[s]['1日の単位数'])*unit_multiplier_map.get(s,{}).get(d,1.0) for s in members if shifts_values.get((s,d),0)==1)
             event_unit_for_day=event_units[job.lower()].get(d,0)+(event_units['all'].get(d,0)*ratios.get(job,0))
             daily_residual_units.append(provided_units-event_unit_for_day)
         if len(daily_residual_units)>1: total_std_dev+=np.std(daily_residual_units)
     return total_std_dev
 
-def is_move_valid(temp_shifts_values,staff_id,move_from_day,params):
-    staff_info=params['staff_info']; year=params['year']; month=params['month']; num_days=calendar.monthrange(year,month)[1]
-    managers=[s for s,i in staff_info.items() if pd.notna(i['役職'])]; kaifukuki_pt=params['kaifukuki_pt']; kaifukuki_ot=params['kaifukuki_ot']
-    if staff_id in managers and sum(temp_shifts_values.get((s,move_from_day),0) for s in managers)==0: return False
-    if staff_id in kaifukuki_pt and sum(temp_shifts_values.get((s,move_from_day),0) for s in kaifukuki_pt)==0: return False
-    if staff_id in kaifukuki_ot and sum(temp_shifts_values.get((s,move_from_day),0) for s in kaifukuki_ot)==0: return False
+def is_move_valid(temp_shifts_values, staff_id, week, params):
+    staff_info=params['staff_info']; year=params['year']; month=params['month']; num_days=calendar.monthrange(year,month)[1]; requests_map=params['requests_map']
+    # S7: 連勤チェック
     max_consecutive_days=5
     for d_start in range(1,num_days-max_consecutive_days+1):
         if sum(temp_shifts_values.get((staff_id,d_start+i),0) for i in range(max_consecutive_days+1))>max_consecutive_days: return False
+    # S0/S2: 週休チェック
+    s_reqs=requests_map.get(staff_id,{}); all_half_day_requests_staff={d for d,r in s_reqs.items() if r in ['AM有','PM有','AM休','PM休']}
+    num_full_holidays_in_week=sum(1-temp_shifts_values.get((staff_id,d),0) for d in week); num_half_holidays_in_week=sum(1 for d in week if d in all_half_day_requests_staff and temp_shifts_values.get((staff_id,d),0)==1); total_holiday_value=2*num_full_holidays_in_week+num_half_holidays_in_week
+    if len(week)==7 and total_holiday_value<3: return False
+    if len(week)<7 and total_holiday_value<1: return False
     return True
 
 def improve_schedule_with_local_search(shifts_values,params):
-    improvement_logs = []
-    staff_info=params['staff_info']; unit_multiplier_map=params['unit_multiplier_map']; event_units=params['event_units']; ratios=params['ratios']; job_types=params['job_types']; weekdays=params['weekdays']; requests_map=params['requests_map']
-    for _ in range(100):
-        current_best_score=calculate_internal_penalty_score(shifts_values,params); best_move=None
-        for job,members in job_types.items():
-            if not members or not weekdays: continue
-            daily_residual_units={d:(sum(int(staff_info[s]['1日の単位数'])*unit_multiplier_map.get(s,{}).get(d,1.0) for s in members if shifts_values.get((s,d),0)==1)-(event_units[job.lower()].get(d,0)+(event_units['all'].get(d,0)*ratios.get(job,0)))) for d in weekdays}
-            if len(daily_residual_units)<2: continue
-            max_day=max(daily_residual_units,key=daily_residual_units.get); min_day=min(daily_residual_units,key=daily_residual_units.get)
-            if max_day==min_day: continue
-            candidates=[s for s in members if shifts_values.get((s,max_day),0)==1 and (pd.isna(requests_map.get(s,{}).get(min_day)) or requests_map.get(s,{}).get(min_day)=='△')]
-            for s_id in candidates:
-                temp_shifts=shifts_values.copy(); temp_shifts[(s_id,max_day)]=0; temp_shifts[(s_id,min_day)]=1
-                if not is_move_valid(temp_shifts,s_id,max_day,params): continue
-                new_score=calculate_internal_penalty_score(temp_shifts,params)
-                move_cost=params.get('tri_penalty_weight',0.5) if requests_map.get(s_id,{}).get(min_day)=='△' else 0
-                if new_score+move_cost<current_best_score: current_best_score=new_score+move_cost; best_move=(s_id,max_day,min_day)
-        if best_move:
-            s_id,move_from,move_to=best_move
-            log_entry = {
-                'staff_name': staff_info[s_id]['職員名'],
-                'symbol': '出',
-                'from_day': move_from,
-                'to_day': move_to
-            }
-            improvement_logs.append(log_entry)
-            shifts_values[(s_id,move_from)]=0; shifts_values[(s_id,move_to)]=1
-        else:
-            break
+    improvement_logs=[]; staff_info=params['staff_info']; requests_map=params['requests_map']; weekdays=params['weekdays']; weeks_in_month=params['weeks_in_month']
+    for _ in range(5):
+        for week in weeks_in_month:
+            week_weekdays=[d for d in week if d in weekdays]
+            if len(week_weekdays)<2: continue
+            for staff_id in params['staff']:
+                if staff_id in params['part_time_staff_ids']: continue
+                work_days_in_week=[d for d in week_weekdays if shifts_values.get((staff_id,d),0)==1]
+                movable_off_days_in_week=[d for d in week_weekdays if shifts_values.get((staff_id,d),0)==0 and (pd.isna(requests_map.get(staff_id,{}).get(d)) or requests_map.get(staff_id,{}).get(d)=='△')]
+                if not work_days_in_week or not movable_off_days_in_week: continue
+                current_score=calculate_weekly_internal_score(shifts_values,week_weekdays,params)
+                best_move=None
+                for work_day in work_days_in_week:
+                    for off_day in movable_off_days_in_week:
+                        temp_shifts=shifts_values.copy(); temp_shifts[(staff_id,work_day)]=0; temp_shifts[(staff_id,off_day)]=1
+                        if not is_move_valid(temp_shifts,staff_id,week,params): continue
+                        new_score=calculate_weekly_internal_score(temp_shifts,week_weekdays,params)
+                        if new_score<current_score:
+                            current_score=new_score; best_move=(staff_id,work_day,off_day)
+                if best_move:
+                    s_id,move_from,move_to=best_move
+                    log_entry={'staff_name':staff_info[s_id]['職員名'],'symbol':'出','from_day':move_from,'to_day':move_to}; improvement_logs.append(log_entry)
+                    shifts_values[(s_id,move_from)]=0; shifts_values[(s_id,move_to)]=1
     return improvement_logs
 
 def solve_shift_model(params):
@@ -480,7 +476,7 @@ if create_button:
         if improvement_logs:
             with st.expander("🔍 山登り法による改善ログ"):
                 for log in improvement_logs:
-                    st.write(f"- **{log['staff_name']}**: {log['from_day']}日({log['symbol']}) → {log['to_day']}(休)")
+                    st.write(f"- **{log['staff_name']}**: {log['from_day']}日(休) → {log['to_day']}日(出)")
         if is_feasible:
             st.header("勤務表"); num_days=calendar.monthrange(year,month)[1]
             summary_T=summary_df.drop(columns=['日','曜日']).T; summary_T.columns=list(range(1,num_days+1)); summary_processed=summary_T.reset_index().rename(columns={'index':'職員名'}); summary_processed['職員番号']=summary_processed['職員名'].apply(lambda x:f"_{x}"); summary_processed['職種']="サマリー"; summary_processed=summary_processed[['職員番号','職員名','職種']+list(range(1,num_days+1))]
