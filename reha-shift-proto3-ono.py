@@ -420,7 +420,9 @@ with st.expander("▼ 各種パラメータを設定する",expanded=True):
     st.markdown("---"); st.subheader(f"{year}年{month}月のイベント設定（各日の特別業務単位数を入力）"); st.info("「全体」タブは職種を問わない業務、「PT/OT/ST」タブは各職種固有の業務を入力します。「全体」に入力された業務は、各職種の標準的な業務量比で自動的に按分されます。"); event_tabs=st.tabs(["全体","PT","OT","ST"]); event_units_input={'all':{},'pt':{},'ot':{},'st':{}}
     for i,tab_name in enumerate(['all','pt','ot','st']):
         with event_tabs[i]:
-            day_counter=1; num_days_in_month=calendar.monthrange(year,month)[1]; first_day_weekday=calendar.weekday(year,month,1); cal_cols=st.columns(7); weekdays_jp=['月','火','水','木','金','土','日']; [cal_cols[day_idx].markdown(f"<p style='text-align:center;'><b>{day_name}</b></p>",unsafe_allow_html=True) for day_idx,day_name in enumerate(weekdays_jp)]
+            day_counter=1; num_days_in_month=calendar.monthrange(year,month)[1]; first_day_weekday=calendar.weekday(year,month,1); cal_cols=st.columns(7);             weekdays_jp=['月','火','水','木','金','土','日']
+            for day_idx,day_name in enumerate(weekdays_jp):
+                cal_cols[day_idx].markdown(f"<p style='text-align:center;'><b>{day_name}</b></p>",unsafe_allow_html=True)
             for week_num in range(6):
                 cols=st.columns(7)
                 for day_of_week in range(7):
