@@ -12,7 +12,7 @@ import json
 import random
 
 # ★★★ バージョン情報 ★★★
-APP_VERSION = "proto.3.0.0" # 2段階最適化アルゴリズム導入
+APP_VERSION = "proto.3.1.0" # 山登り法ログ表示機能
 APP_CREDIT = "Okuno with 🤖 Gemini and Claude"
 
 # --- Gspread ヘルパー関数 ---
@@ -223,11 +223,12 @@ def is_move_valid(temp_shifts_values,staff_id,move_from_day,params):
     if staff_id in kaifukuki_pt and sum(temp_shifts_values.get((s,move_from_day),0) for s in kaifukuki_pt)==0: return False
     if staff_id in kaifukuki_ot and sum(temp_shifts_values.get((s,move_from_day),0) for s in kaifukuki_ot)==0: return False
     max_consecutive_days=5
-    for d_start in range(1,num_days-max_consecutive_days+2):
+    for d_start in range(1,num_days-max_consecutive_days+1):
         if sum(temp_shifts_values.get((staff_id,d_start+i),0) for i in range(max_consecutive_days+1))>max_consecutive_days: return False
     return True
 
 def improve_schedule_with_local_search(shifts_values,params):
+    improvement_logs = []
     staff_info=params['staff_info']; unit_multiplier_map=params['unit_multiplier_map']; event_units=params['event_units']; ratios=params['ratios']; job_types=params['job_types']; weekdays=params['weekdays']; requests_map=params['requests_map']
     for _ in range(100):
         current_best_score=calculate_internal_penalty_score(shifts_values,params); best_move=None
@@ -244,8 +245,19 @@ def improve_schedule_with_local_search(shifts_values,params):
                 new_score=calculate_internal_penalty_score(temp_shifts,params)
                 move_cost=params.get('tri_penalty_weight',0.5) if requests_map.get(s_id,{}).get(min_day)=='△' else 0
                 if new_score+move_cost<current_best_score: current_best_score=new_score+move_cost; best_move=(s_id,max_day,min_day)
-        if best_move: s_id,move_from,move_to=best_move; shifts_values[(s_id,move_from)]=0; shifts_values[(s_id,move_to)]=1
-        else: break
+        if best_move:
+            s_id,move_from,move_to=best_move
+            log_entry = {
+                'staff_name': staff_info[s_id]['職員名'],
+                'symbol': '出',
+                'from_day': move_from,
+                'to_day': move_to
+            }
+            improvement_logs.append(log_entry)
+            shifts_values[(s_id,move_from)]=0; shifts_values[(s_id,move_to)]=1
+        else:
+            break
+    return improvement_logs
 
 def solve_shift_model(params):
     year,month=params['year'],params['month']; num_days=calendar.monthrange(year,month)[1]; days=list(range(1,num_days+1)); params['days']=days
@@ -361,15 +373,15 @@ def solve_shift_model(params):
     if status==cp_model.OPTIMAL or status==cp_model.FEASIBLE:
         shifts_values={(s,d):solver.Value(shifts[(s,d)]) for s in staff for d in days}
         initial_score,_=calculate_final_penalties_and_details(shifts_values,params)
-        improve_schedule_with_local_search(shifts_values,params)
+        improvement_logs = improve_schedule_with_local_search(shifts_values,params)
         final_score,final_details=calculate_final_penalties_and_details(shifts_values,params)
         schedule_df=_create_schedule_df(shifts_values,staff,days,params['staff_df'],requests_map,year,month)
         summary_df=_create_summary(schedule_df,staff_info,year,month,params['event_units'],params['unit_multiplier_map'])
         message=f"求解ステータス: {solver.StatusName(status)} | 改善前スコア: {round(initial_score)} → 最終スコア: {round(final_score)} (差: {round(initial_score - final_score)})"
-        return True,schedule_df,summary_df,message,final_details
+        return True,schedule_df,summary_df,message,final_details,improvement_logs
     else:
         message=f"致命的なエラー: ハード制約が矛盾しているため、勤務表を作成できませんでした。({solver.StatusName(status)})"
-        return False,pd.DataFrame(),pd.DataFrame(),message,[]
+        return False,pd.DataFrame(),pd.DataFrame(),message,[],[]
 
 # --- Streamlit UI ---
 st.set_page_config(layout="wide")
@@ -420,7 +432,8 @@ with st.expander("▼ 各種パラメータを設定する",expanded=True):
     st.markdown("---"); st.subheader(f"{year}年{month}月のイベント設定（各日の特別業務単位数を入力）"); st.info("「全体」タブは職種を問わない業務、「PT/OT/ST」タブは各職種固有の業務を入力します。「全体」に入力された業務は、各職種の標準的な業務量比で自動的に按分されます。"); event_tabs=st.tabs(["全体","PT","OT","ST"]); event_units_input={'all':{},'pt':{},'ot':{},'st':{}}
     for i,tab_name in enumerate(['all','pt','ot','st']):
         with event_tabs[i]:
-            day_counter=1; num_days_in_month=calendar.monthrange(year,month)[1]; first_day_weekday=calendar.weekday(year,month,1); cal_cols=st.columns(7);             weekdays_jp=['月','火','水','木','金','土','日']
+            day_counter=1; num_days_in_month=calendar.monthrange(year,month)[1]; first_day_weekday=calendar.weekday(year,month,1); cal_cols=st.columns(7)
+            weekdays_jp=['月','火','水','木','金','土','日']
             for day_idx,day_name in enumerate(weekdays_jp):
                 cal_cols[day_idx].markdown(f"<p style='text-align:center;'><b>{day_name}</b></p>",unsafe_allow_html=True)
             for week_num in range(6):
@@ -462,8 +475,12 @@ if create_button:
         if missing_cols: st.error(f"エラー:職員一覧シートの必須列が不足しています:**{', '.join(missing_cols)}**"); st.stop()
         if '職員番号' not in params['requests_df'].columns: st.error(f"エラー:希望休一覧シートに必須列 **'職員番号'** がありません。"); st.stop()
         if '職員名' not in params['staff_df'].columns: params['staff_df']['職員名']=params['staff_df']['職種']+" "+params['staff_df']['職員番号'].astype(str); st.info("職員一覧に「職員名」列がなかったため、仮の職員名を生成しました。")
-        is_feasible,schedule_df,summary_df,message,penalty_details=solve_shift_model(params)
+        is_feasible,schedule_df,summary_df,message,penalty_details,improvement_logs=solve_shift_model(params)
         st.info(message)
+        if improvement_logs:
+            with st.expander("🔍 山登り法による改善ログ"):
+                for log in improvement_logs:
+                    st.write(f"- **{log['staff_name']}**: {log['from_day']}日({log['symbol']}) → {log['to_day']}(休)")
         if is_feasible:
             st.header("勤務表"); num_days=calendar.monthrange(year,month)[1]
             summary_T=summary_df.drop(columns=['日','曜日']).T; summary_T.columns=list(range(1,num_days+1)); summary_processed=summary_T.reset_index().rename(columns={'index':'職員名'}); summary_processed['職員番号']=summary_processed['職員名'].apply(lambda x:f"_{x}"); summary_processed['職種']="サマリー"; summary_processed=summary_processed[['職員番号','職員名','職種']+list(range(1,num_days+1))]
