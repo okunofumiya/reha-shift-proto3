@@ -199,7 +199,7 @@ def calculate_final_penalties_and_details(shifts_values, params):
         max_consecutive_days=5
         for s in staff:
             if s in part_time_staff_ids: continue
-            for d in range(1,num_days-max_consecutive_days+2):
+            for d in range(1,num_days-max_consecutive_days+1):
                 if sum(shifts_values.get((s,d+i),0) for i in range(max_consecutive_days+1))>max_consecutive_days: total_penalty_score+=params['s7_penalty']; penalty_details.append({'rule':'S7:連続勤務日数超過','staff':staff_info[s]['職員名'],'day':f'{d}日～{d+max_consecutive_days}日','highlight_days':list(range(d,d+max_consecutive_days+1)),'detail':f'{max_consecutive_days+1}日間の連続勤務が発生しています。'}); break
     return total_penalty_score,penalty_details
 
@@ -353,7 +353,7 @@ def solve_shift_model(params):
         max_consecutive_days=5
         for s in staff:
             if s in part_time_staff_ids: continue
-            for d in range(1,num_days-max_consecutive_days+2):
+            for d in range(1,num_days-max_consecutive_days+1):
                 is_over=model.NewBoolVar(f's7_over_{s}_{d}'); model.Add(sum(shifts[(s,d+i)] for i in range(max_consecutive_days+1))==max_consecutive_days+1).OnlyEnforceIf(is_over); model.Add(sum(shifts[(s,d+i)] for i in range(max_consecutive_days+1))<max_consecutive_days+1).OnlyEnforceIf(is_over.Not()); penalties.append(params['s7_penalty']*is_over)
     model.Minimize(sum(penalties))
     solver=cp_model.CpSolver(); solver.parameters.random_seed=random.randint(0,2**30); solver.parameters.max_time_in_seconds=60.0
