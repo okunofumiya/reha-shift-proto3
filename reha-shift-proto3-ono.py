@@ -12,7 +12,7 @@ import json
 import random
 
 # ★★★ バージョン情報 ★★★
-APP_VERSION = "proto.3.3.0" # 山登り法ロジック再修正
+APP_VERSION = "proto.3.3.1" # 山登り法コスト計算修正
 APP_CREDIT = "Okuno with 🤖 Gemini and Claude"
 
 # --- Gspread ヘルパー関数 ---
@@ -232,28 +232,32 @@ def is_move_valid(temp_shifts_values, staff_id, week, params):
 def improve_schedule_with_local_search(shifts_values,params):
     improvement_logs=[]; staff_info=params['staff_info']; requests_map=params['requests_map']; weekdays=params['weekdays']; weeks_in_month=params['weeks_in_month']
     for _ in range(5):
+        improvement_made_in_pass = False
         for week in weeks_in_month:
             week_weekdays=[d for d in week if d in weekdays]
             if len(week_weekdays)<2: continue
             for staff_id in params['staff']:
                 if staff_id in params['part_time_staff_ids']: continue
-                work_days_in_week=[d for d in week_weekdays if shifts_values.get((staff_id,d),0)==1 and pd.isna(requests_map.get(staff_id,{}).get(d))]
-                movable_off_days_in_week=[d for d in week_weekdays if shifts_values.get((staff_id,d),0)==0 and (pd.isna(requests_map.get(staff_id,{}).get(d)) or requests_map.get(staff_id,{}).get(d)=='△')]
-                if not work_days_in_week or not movable_off_days_in_week: continue
                 current_score=calculate_weekly_internal_score(shifts_values,week_weekdays,params)
-                best_move=None
-                for work_day in work_days_in_week:
-                    for off_day in movable_off_days_in_week:
+                best_move=None; best_score_so_far = current_score
+                movable_off_days=[d for d in week_weekdays if shifts_values.get((staff_id,d),0)==0 and (pd.isna(requests_map.get(staff_id,{}).get(d)) or requests_map.get(staff_id,{}).get(d)=='△')]
+                work_days=[d for d in week_weekdays if shifts_values.get((staff_id,d),0)==1 and pd.isna(requests_map.get(staff_id,{}).get(d))]
+                if not work_days or not movable_off_days: continue
+                for off_day in movable_off_days:
+                    for work_day in work_days:
                         temp_shifts=shifts_values.copy(); temp_shifts[(staff_id,work_day)]=0; temp_shifts[(staff_id,off_day)]=1
                         if not is_move_valid(temp_shifts,staff_id,week,params): continue
                         new_score=calculate_weekly_internal_score(temp_shifts,week_weekdays,params)
-                        if new_score<current_score:
-                            current_score=new_score; best_move=(staff_id,off_day,work_day)
+                        if new_score < best_score_so_far:
+                            best_score_so_far=new_score; best_move=(staff_id,off_day,work_day)
                 if best_move:
                     s_id,move_from,move_to=best_move
                     log_symbol = '△' if requests_map.get(s_id,{}).get(move_from) == '△' else '-'
                     log_entry={'staff_name':staff_info[s_id]['職員名'],'symbol':log_symbol,'from_day':move_from,'to_day':move_to}; improvement_logs.append(log_entry)
                     shifts_values[(s_id,move_from)]=1; shifts_values[(s_id,move_to)]=0
+                    improvement_made_in_pass = True
+        if not improvement_made_in_pass:
+            break
     return improvement_logs
 
 def solve_shift_model(params):
