@@ -248,8 +248,9 @@ def improve_schedule_with_local_search(shifts_values,params):
                         temp_shifts=shifts_values.copy(); temp_shifts[(staff_id,work_day)]=0; temp_shifts[(staff_id,off_day)]=1
                         if not is_move_valid(temp_shifts,staff_id,week,params): continue
                         new_score=calculate_weekly_internal_score(temp_shifts,week_weekdays,params)
-                        if new_score < best_score_so_far:
-                            best_score_so_far=new_score; best_move=(staff_id,off_day,work_day)
+                        if new_score + move_cost < best_score_so_far:
+                            best_score_so_far = new_score + move_cost
+                            best_move = (staff_id, off_day, work_day)
                 if best_move:
                     s_id,move_from,move_to=best_move
                     log_symbol = '△' if requests_map.get(s_id,{}).get(move_from) == '△' else '-'
