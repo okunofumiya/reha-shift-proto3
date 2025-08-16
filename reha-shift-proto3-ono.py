@@ -486,7 +486,10 @@ if create_button:
                             staff_rows=data[data[('職員情報','職員名')]==p['staff']].index
                             if not staff_rows.empty:
                                 row_idx=staff_rows[0]
-                                if day_col_tuples: [df.loc.__setitem__((row_idx,day_col_tuple),'background-color: #ffcccc') for day_col_tuple in day_col_tuples if day_col_tuple in df.columns]
+                                if day_col_tuples:
+                                    for day_col_tuple in day_col_tuples:
+                                        if day_col_tuple in df.columns:
+                                            df.loc[row_idx, day_col_tuple] = 'background-color: #ffcccc'
                                 else: df.loc[row_idx,('職員情報','職員名')]='background-color: #ffcccc'
                         elif day_col_tuples:
                             target_summary_row_name=None
@@ -494,7 +497,10 @@ if create_button:
                             elif p['rule']=='S5:回復期担当未配置': target_summary_row_name='回復期'
                             if target_summary_row_name:
                                 summary_rows=data[data[('職員情報','職員名')]==target_summary_row_name].index
-                                if not summary_rows.empty: [df.loc.__setitem__((summary_rows[0],day_col_tuple),'background-color: #ffcccc') for day_col_tuple in day_col_tuples if day_col_tuple in df.columns]
+                                if not summary_rows.empty:
+                                    for day_col_tuple in day_col_tuples:
+                                        if day_col_tuple in df.columns:
+                                            df.loc[summary_rows[0], day_col_tuple] = 'background-color: #ffcccc'
                     return df
                 styler=styler.apply(highlight_penalties,axis=None)
             st.dataframe(styler)
