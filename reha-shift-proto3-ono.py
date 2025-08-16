@@ -12,7 +12,7 @@ import json
 import random
 
 # ★★★ バージョン情報 ★★★
-APP_VERSION = "proto.3.2.0" # 山登り法ロジック修正
+APP_VERSION = "proto.3.3.0" # 山登り法ロジック再修正
 APP_CREDIT = "Okuno with 🤖 Gemini and Claude"
 
 # --- Gspread ヘルパー関数 ---
@@ -237,7 +237,7 @@ def improve_schedule_with_local_search(shifts_values,params):
             if len(week_weekdays)<2: continue
             for staff_id in params['staff']:
                 if staff_id in params['part_time_staff_ids']: continue
-                work_days_in_week=[d for d in week_weekdays if shifts_values.get((staff_id,d),0)==1]
+                work_days_in_week=[d for d in week_weekdays if shifts_values.get((staff_id,d),0)==1 and pd.isna(requests_map.get(staff_id,{}).get(d))]
                 movable_off_days_in_week=[d for d in week_weekdays if shifts_values.get((staff_id,d),0)==0 and (pd.isna(requests_map.get(staff_id,{}).get(d)) or requests_map.get(staff_id,{}).get(d)=='△')]
                 if not work_days_in_week or not movable_off_days_in_week: continue
                 current_score=calculate_weekly_internal_score(shifts_values,week_weekdays,params)
@@ -248,11 +248,12 @@ def improve_schedule_with_local_search(shifts_values,params):
                         if not is_move_valid(temp_shifts,staff_id,week,params): continue
                         new_score=calculate_weekly_internal_score(temp_shifts,week_weekdays,params)
                         if new_score<current_score:
-                            current_score=new_score; best_move=(staff_id,work_day,off_day)
+                            current_score=new_score; best_move=(staff_id,off_day,work_day)
                 if best_move:
                     s_id,move_from,move_to=best_move
-                    log_entry={'staff_name':staff_info[s_id]['職員名'],'symbol':'出','from_day':move_from,'to_day':move_to}; improvement_logs.append(log_entry)
-                    shifts_values[(s_id,move_from)]=0; shifts_values[(s_id,move_to)]=1
+                    log_symbol = '△' if requests_map.get(s_id,{}).get(move_from) == '△' else '-'
+                    log_entry={'staff_name':staff_info[s_id]['職員名'],'symbol':log_symbol,'from_day':move_from,'to_day':move_to}; improvement_logs.append(log_entry)
+                    shifts_values[(s_id,move_from)]=1; shifts_values[(s_id,move_to)]=0
     return improvement_logs
 
 def solve_shift_model(params):
@@ -476,7 +477,7 @@ if create_button:
         if improvement_logs:
             with st.expander("🔍 山登り法による改善ログ"):
                 for log in improvement_logs:
-                    st.write(f"- **{log['staff_name']}**: {log['from_day']}日(休) → {log['to_day']}日(出)")
+                    st.write(f"- **{log['staff_name']}**: {log['from_day']}日({log['symbol']}) → {log['to_day']}日")
         if is_feasible:
             st.header("勤務表"); num_days=calendar.monthrange(year,month)[1]
             summary_T=summary_df.drop(columns=['日','曜日']).T; summary_T.columns=list(range(1,num_days+1)); summary_processed=summary_T.reset_index().rename(columns={'index':'職員名'}); summary_processed['職員番号']=summary_processed['職員名'].apply(lambda x:f"_{x}"); summary_processed['職種']="サマリー"; summary_processed=summary_processed[['職員番号','職員名','職種']+list(range(1,num_days+1))]
