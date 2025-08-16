@@ -267,7 +267,7 @@ def solve_shift_model(params):
                 elif req in ['前2h有','後2h有']: unit_multiplier_map[staff_id][d]=0.7
                 else: unit_multiplier_map[staff_id][d]=1.0
     params['requests_map']=requests_map; params['unit_multiplier_map']=unit_multiplier_map
-    prev_month_date=datetime(year,month,1)-relativedelta(days=1); params['is_cross_month_week']=prev_month_date.weekday()!=5
+    prev_month_date=datetime(year,month,1)-relativedelta(days=1); is_cross_month_week=prev_month_date.weekday()!=5; params['is_cross_month_week']=is_cross_month_week
     if params['is_cross_month_week'] and '前月最終週の休日数' in params['requests_df'].columns:
         staff_df_merged=params['staff_df'].merge(params['requests_df'][['職員番号','前月最終週の休日数']],on='職員番号',how='left'); staff_df_merged['前月最終週の休日数'].fillna(0,inplace=True); params['staff_info']=staff_df_merged.set_index('職員番号').to_dict('index'); staff_info=params['staff_info']
     else:
