@@ -21,7 +21,7 @@ def get_presets_worksheet():
     try:
         creds_dict = st.secrets["gcp_service_account"]
         sa = gspread.service_account_from_dict(creds_dict)
-        spreadsheet = sa.open("設定ファイル（土井）")
+        spreadsheet = sa.open("設定ファイル（小野）")
         worksheet = spreadsheet.worksheet("設定プリセット")
         # ヘッダーを確認・作成
         headers = worksheet.row_values(1)
@@ -528,8 +528,12 @@ def solve_shift_model(params):
                 penalties.append(params['s7_penalty'] * is_over)
 
     model.Minimize(sum(penalties))
-    solver = cp_model.CpSolver(); solver.parameters.max_time_in_seconds = 60.0; status = solver.Solve(model)
-    
+    solver = cp_model.CpSolver()
+    # ★ここから追加
+    import random
+    solver.parameters.random_seed = random.randint(0, 2**30)
+    # ★ここまで追加
+    solver.parameters.max_time_in_seconds = 60.0; status = solver.Solve(model)
     if status == cp_model.OPTIMAL or status == cp_model.FEASIBLE:
         shifts_values = {(s, d): solver.Value(shifts[(s, d)]) for s in staff for d in days}
         # --- ペナルティ詳細の収集 ---
@@ -941,7 +945,7 @@ if create_button:
     try:
         creds_dict = st.secrets["gcp_service_account"]
         sa = gspread.service_account_from_dict(creds_dict)
-        spreadsheet = sa.open("設定ファイル（土井）")
+        spreadsheet = sa.open("設定ファイル（小野）")
         
         st.info("🔄 スプレッドシートから職員一覧を読み込んでいます...")
         staff_worksheet = spreadsheet.worksheet("職員一覧")
