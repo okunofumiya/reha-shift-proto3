@@ -11,7 +11,7 @@ from gspread_dataframe import get_as_dataframe
 import json
 
 # ★★★ バージョン情報 ★★★
-APP_VERSION = "proto.2.3.0" # 設定保存・読込機能追加
+APP_VERSION = "proto.2.4.0" # S6-W: 週単位の業務負荷平準化ルールを追加
 APP_CREDIT = "Okuno with 🤖 Gemini and Claude"
 
 # --- Gspread ヘルパー関数 (新規追加) ---
@@ -80,13 +80,14 @@ def save_preset(worksheet, name, json_data):
 def gather_current_ui_settings():
     """UIから現在の設定をすべて集めて辞書として返す"""
     settings = {}
+    # ★ S6-Wのキーを追加
     keys_to_save = [
         'tolerance', 'tri_penalty_weight', 'is_saturday_special',
         'pt_sun', 'ot_sun', 'st_sun', 'pt_sat', 'ot_sat', 'st_sat',
         'h1', 'h1p', 'h2', 'h2p', 'h3', 'h3p', 'h5', 'h5p',
         'h_weekend_limit_penalty',
         's0', 's0p', 's2', 's2p', 's3', 's3p', 's4', 's4p',
-        's5', 's5p', 's6', 's6p', 's6ph', 'high_flat', 's7', 's7p',
+        's5', 's5p', 's6', 's6p', 's6ph', 's6w', 's6wp', 's6wph', 'high_flat', 's7', 's7p',
         's1a', 's1ap', 's1b', 's1bp', 's1c', 's1cp'
     ]
     for key in keys_to_save:
@@ -381,22 +382,6 @@ def solve_shift_model(params):
                     model.Add(under_limit >= 0)
                     penalties.append(params['h5_penalty'] * under_limit)
 
-    # 以前のH5と週末上限ロジックはここに移動・統合されたため、下のコードブロックは削除またはコメントアウト
-    # if params.get('h5_on', False):
-    #     for s in staff:
-    #         if s in params['part_time_staff_ids']: continue
-    #         if pd.notna(staff_info[s].get('日曜上限')):
-    #             sunday_limit = int(staff_info[s]['日曜上限'])
-    #             num_sundays_worked = sum(shifts[(s, d)] for d in sundays)
-    #             over_limit = model.NewIntVar(0, len(sundays), f'sunday_over_{s}')
-    #             model.Add(over_limit >= num_sundays_worked - sunday_limit)
-    #             model.Add(over_limit >= 0)
-    #             penalties.append(params['h5_penalty'] * over_limit)
-
-    # for s in staff:
-    #     if s in params['part_time_staff_ids']: continue
-    #     # ... (古い週末上限/下限コード) ...
-
     sunday_overwork_penalty = 50 
     for s in staff:
         if s in params['part_time_staff_ids']: continue
@@ -413,13 +398,14 @@ def solve_shift_model(params):
                 if req_type == '△':
                     penalties.append(params['s4_penalty'] * shifts[(s, d)])
 
+    # ★ S0/S2/S6-Wで共通して使うため、ここで計算
+    weeks_in_month = []; current_week = []
+    for d in days:
+        current_week.append(d)
+        if calendar.weekday(year, month, d) == 5 or d == num_days: weeks_in_month.append(current_week); current_week = []
+    params['weeks_in_month'] = weeks_in_month
+
     if params['s0_on'] or params['s2_on']:
-        weeks_in_month = []; current_week = []
-        for d in days:
-            current_week.append(d)
-            if calendar.weekday(year, month, d) == 5 or d == num_days: weeks_in_month.append(current_week); current_week = []
-        params['weeks_in_month'] = weeks_in_month
-        
         for s_idx, s in enumerate(staff):
             if s in params['part_time_staff_ids']: continue
             s_reqs = requests_map.get(s, {})
@@ -474,15 +460,14 @@ def solve_shift_model(params):
     if params['s6_on']:
         unit_penalty_weight = params.get('s6_penalty_heavy', 4) if params.get('high_flat_penalty') else params.get('s6_penalty', 2)
         event_units = params['event_units']
-        unit_multiplier_map = params['unit_multiplier_map'] # 追加
+        unit_multiplier_map = params['unit_multiplier_map']
 
         total_weekday_units_by_job = {}
         for job, members in job_types.items():
             if not members: total_weekday_units_by_job[job] = 0; continue
-            # 休日希望日を考慮した総単位数を計算 (より正確に)
             total_units = sum(
                 int(staff_info[s]['1日の単位数']) * 
-                (1 - sum(1 for d in weekdays if requests_map.get(s, {}).get(d) in ['有','特','夏','×','△']) / len(weekdays)) 
+                (1 - sum(1 for d in weekdays if requests_map.get(s, {}).get(d) in ['有','特','夏','×','△']) / len(weekdays)) if weekdays else 1
                 for s in members
             )
             total_weekday_units_by_job[job] = total_units
@@ -512,6 +497,70 @@ def solve_shift_model(params):
                 residual_units_expr = model.NewIntVar(-4000, 4000, f'r_{job}_{d}'); model.Add(residual_units_expr == provided_units_expr - round(event_unit_for_day))
                 diff_expr = model.NewIntVar(-4000, 4000, f'u_d_{job}_{d}'); model.Add(diff_expr == residual_units_expr - round(avg_residual_units))
                 abs_diff_expr = model.NewIntVar(0, 4000, f'a_u_d_{job}_{d}'); model.AddAbsEquality(abs_diff_expr, diff_expr); penalties.append(unit_penalty_weight * abs_diff_expr)
+
+    # ★ S6-W: 週単位の業務負荷平準化 (新規追加)
+    if params.get('s6w_on', False):
+        unit_penalty_weight_w = params.get('s6wph') if params.get('high_flat_penalty') else params.get('s6wp')
+        event_units = params['event_units']
+        unit_multiplier_map = params['unit_multiplier_map']
+        
+        for w_idx, week in enumerate(weeks_in_month):
+            week_weekdays = [d for d in week if d in weekdays]
+            if not week_weekdays: continue
+
+            # 週ごとの総単位数と平均残余業務量を計算
+            total_week_units_by_job = {}
+            for job, members in job_types.items():
+                if not members: 
+                    total_week_units_by_job[job] = 0
+                    continue
+                total_units = sum(
+                    int(staff_info[s]['1日の単位数']) * 
+                    (1 - sum(1 for d in week_weekdays if requests_map.get(s, {}).get(d) in ['有','特','夏','×','△']) / len(week_weekdays))
+                    for s in members
+                )
+                total_week_units_by_job[job] = total_units
+
+            total_all_jobs_units_week = sum(total_week_units_by_job.values())
+            ratios_week = {job: total_units / total_all_jobs_units_week if total_all_jobs_units_week > 0 else 0 for job, total_units in total_week_units_by_job.items()}
+            
+            avg_residual_units_by_job_week = {}
+            total_event_units_all_week = sum(event_units['all'].get(d, 0) for d in week_weekdays)
+
+            for job, members in job_types.items():
+                if not week_weekdays or not members:
+                    avg_residual_units_by_job_week[job] = 0
+                    continue
+                total_event_units_job_week = sum(event_units[job.lower()].get(d, 0) for d in week_weekdays)
+                total_event_units_for_job_week = total_event_units_job_week + (total_event_units_all_week * ratios_week.get(job, 0))
+                avg_residual_units_by_job_week[job] = (total_week_units_by_job.get(job, 0) - total_event_units_for_job_week) / len(week_weekdays)
+
+            # 週内の各平日についてペナルティを計算
+            for job, members in job_types.items():
+                if not members: continue
+                avg_residual_units_week = avg_residual_units_by_job_week.get(job, 0)
+                ratio_week = ratios_week.get(job, 0)
+                for d in week_weekdays:
+                    provided_units_expr_list = []
+                    for s in members:
+                        unit = int(staff_info[s]['1日の単位数'])
+                        multiplier = unit_multiplier_map.get(s, {}).get(d, 1.0)
+                        constant_unit = int(unit * multiplier)
+                        term = model.NewIntVar(0, constant_unit, f'p_u_w_s{s}_d{d}')
+                        model.Add(term == shifts[(s,d)] * constant_unit)
+                        provided_units_expr_list.append(term)
+                    
+                    provided_units_expr = sum(provided_units_expr_list)
+                    event_unit_for_day = event_units[job.lower()].get(d, 0) + (event_units['all'].get(d, 0) * ratio_week)
+                    residual_units_expr = model.NewIntVar(-4000, 4000, f'r_w_{job}_{d}')
+                    model.Add(residual_units_expr == provided_units_expr - round(event_unit_for_day))
+                    
+                    diff_expr = model.NewIntVar(-4000, 4000, f'u_d_w_{job}_{d}')
+                    model.Add(diff_expr == residual_units_expr - round(avg_residual_units_week))
+                    
+                    abs_diff_expr = model.NewIntVar(0, 4000, f'a_u_d_w_{job}_{d}')
+                    model.AddAbsEquality(abs_diff_expr, diff_expr)
+                    penalties.append(unit_penalty_weight_w * abs_diff_expr)
 
     # S7: 連続勤務日数制限 (新規追加)
     if params.get('s7_on', False):
@@ -886,10 +935,6 @@ with st.expander("▼ ルール検証モード（上級者向け）"):
         params_ui['h5_on'] = st.toggle('H5: 土日出勤回数', value=st.session_state.get('h5', True), key='h5', help="職員ごとに設定された土日の出勤回数の上限/下限を守るルールです。")
         params_ui['h5_penalty'] = st.number_input("H5 Penalty", value=st.session_state.get('h5p', 1000), disabled=not params_ui['h5_on'], key='h5p')
     
-    # h_cols_new と h_weekend_limit_penalty は不要になるため削除
-    # h_cols_new = st.columns(1)
-    # with h_cols_new[0]:
-    #     params_ui['h_weekend_limit_penalty'] = st.number_input("土日上限/下限 Penalty", value=st.session_state.get('h_weekend_limit_penalty', 1000), key='h_weekend_limit_penalty', help="スプレッドシートで設定した職員ごとの土日出勤回数の上限/下限に関するペナルティです。")
     params_ui['h_weekend_limit_penalty'] = params_ui['h5_penalty'] # 互換性のための代入
     
     params_ui['h4_on'] = False
@@ -913,16 +958,25 @@ with st.expander("▼ ルール検証モード（上級者向け）"):
     with s_cols2[0]:
         params_ui['s5_on'] = st.toggle('S5: 回復期配置', value=st.session_state.get('s5', True), key='s5')
         params_ui['s5_penalty'] = st.number_input("S5 Penalty", value=st.session_state.get('s5p', 5), disabled=not params_ui['s5_on'], key='s5p')
+    # ★ S6とS6-WのUIを修正
     with s_cols2[1]:
-        params_ui['s6_on'] = st.toggle('S6: 職種別 業務負荷平準化', value=st.session_state.get('s6', True), key='s6')
+        params_ui['s6_on'] = st.toggle('S6: 月別 業務負荷平準化', value=st.session_state.get('s6', True), key='s6')
         c_s6_1, c_s6_2 = st.columns(2)
         params_ui['s6_penalty'] = c_s6_1.number_input("S6 標準P", value=st.session_state.get('s6p', 2), disabled=not params_ui['s6_on'], key='s6p')
         params_ui['s6_penalty_heavy'] = c_s6_2.number_input("S6 強化P", value=st.session_state.get('s6ph', 4), disabled=not params_ui['s6_on'], key='s6ph')
+        
+        st.markdown("---")
+
+        params_ui['s6w_on'] = st.toggle('S6-W: 週別 業務負荷平準化', value=st.session_state.get('s6w', False), key='s6w')
+        c_s6w_1, c_s6w_2 = st.columns(2)
+        params_ui['s6w_penalty'] = c_s6w_1.number_input("S6-W 標準P", value=st.session_state.get('s6wp', 3), disabled=not params_ui['s6w_on'], key='s6wp')
+        params_ui['s6w_penalty_heavy'] = c_s6w_2.number_input("S6-W 強化P", value=st.session_state.get('s6wph', 6), disabled=not params_ui['s6w_on'], key='s6wph')
+
     with s_cols2[2]:
         params_ui['s7_on'] = st.toggle('S7: 連続勤務日数', value=st.session_state.get('s7', True), key='s7')
         params_ui['s7_penalty'] = st.number_input("S7 Penalty", value=st.session_state.get('s7p', 50), disabled=not params_ui['s7_on'], key='s7p')
     with s_cols2[3]:
-        params_ui['high_flat_penalty'] = st.toggle('平準化ペナルティ強化', value=st.session_state.get('high_flat', False), key='high_flat', help="S6のペナルティを「標準P」ではなく「強化P」で計算します。")
+        params_ui['high_flat_penalty'] = st.toggle('平準化ペナルティ強化', value=st.session_state.get('high_flat', False), key='high_flat', help="S6/S6-Wのペナルティを「標準P」ではなく「強化P」で計算します。")
         
     st.markdown("##### S1: 日曜人数目標")
     s_cols3 = st.columns(3)
