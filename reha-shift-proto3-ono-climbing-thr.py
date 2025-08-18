@@ -336,6 +336,7 @@ def improve_schedule_with_local_search(shifts_values, params):
             st.write(f"{len(log_messages)}回の改善を行いました。")
             for msg in log_messages:
                 st.markdown(msg, unsafe_allow_html=True)
+    return shifts_values
 
 
 # --- 第2部: ペナルティ計算関数 ---
