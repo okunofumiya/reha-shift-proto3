@@ -87,7 +87,7 @@ def gather_current_ui_settings():
         'h1', 'h1p', 'h2', 'h2p', 'h3', 'h3p', 'h5', 'h5p',
         'h_weekend_limit_penalty',
         's0', 's0p', 's2', 's2p', 's3', 's3p', 's4', 's4p',
-        's5', 's5p', 's6', 's6p', 's6ph', 's6w', 's6wp', 's6wph', 'high_flat', 's7', 's7p',
+        's5', 's5p', 's6', 's6p', 's6w', 's6wp', 's7', 's7p',
         's1a', 's1ap', 's1b', 's1bp', 's1c', 's1cp'
     ]
     for key in keys_to_save:
@@ -458,7 +458,7 @@ def solve_shift_model(params):
             pt_present = model.NewBoolVar(f'k_p_p_{d}'); ot_present = model.NewBoolVar(f'k_o_p_{d}'); model.Add(kaifukuki_pt_on >= 1).OnlyEnforceIf(pt_present); model.Add(kaifukuki_pt_on == 0).OnlyEnforceIf(pt_present.Not()); model.Add(kaifukuki_ot_on >= 1).OnlyEnforceIf(ot_present); model.Add(kaifukuki_ot_on == 0).OnlyEnforceIf(ot_present.Not()); penalties.append(params['s5_penalty'] * (1 - pt_present)); penalties.append(params['s5_penalty'] * (1 - ot_present))
     
     if params['s6_on']:
-        unit_penalty_weight = params.get('s6_penalty_heavy', 4) if params.get('high_flat_penalty') else params.get('s6_penalty', 2)
+        unit_penalty_weight = params.get('s6_penalty', 2)
         event_units = params['event_units']
         unit_multiplier_map = params['unit_multiplier_map']
 
@@ -500,7 +500,7 @@ def solve_shift_model(params):
 
     # ★ S6-W: 週単位の業務負荷平準化 (新規追加)
     if params.get('s6w_on', False):
-        unit_penalty_weight_w = params.get('s6wph') if params.get('high_flat_penalty') else params.get('s6wp')
+        unit_penalty_weight_w = params.get('s6wp', 3)
         event_units = params['event_units']
         unit_multiplier_map = params['unit_multiplier_map']
         
@@ -958,25 +958,15 @@ with st.expander("▼ ルール検証モード（上級者向け）"):
     with s_cols2[0]:
         params_ui['s5_on'] = st.toggle('S5: 回復期配置', value=st.session_state.get('s5', True), key='s5')
         params_ui['s5_penalty'] = st.number_input("S5 Penalty", value=st.session_state.get('s5p', 5), disabled=not params_ui['s5_on'], key='s5p')
-    # ★ S6とS6-WのUIを修正
     with s_cols2[1]:
         params_ui['s6_on'] = st.toggle('S6: 月別 業務負荷平準化', value=st.session_state.get('s6', True), key='s6')
-        c_s6_1, c_s6_2 = st.columns(2)
-        params_ui['s6_penalty'] = c_s6_1.number_input("S6 標準P", value=st.session_state.get('s6p', 2), disabled=not params_ui['s6_on'], key='s6p')
-        params_ui['s6_penalty_heavy'] = c_s6_2.number_input("S6 強化P", value=st.session_state.get('s6ph', 4), disabled=not params_ui['s6_on'], key='s6ph')
-        
-        st.markdown("---")
-
-        params_ui['s6w_on'] = st.toggle('S6-W: 週別 業務負荷平準化', value=st.session_state.get('s6w', False), key='s6w')
-        c_s6w_1, c_s6w_2 = st.columns(2)
-        params_ui['s6wp'] = c_s6w_1.number_input("S6-W 標準P", value=st.session_state.get('s6wp', 3), disabled=not params_ui['s6w_on'], key='s6wp')
-        params_ui['s6wph'] = c_s6w_2.number_input("S6-W 強化P", value=st.session_state.get('s6wph', 6), disabled=not params_ui['s6w_on'], key='s6wph')
-
+        params_ui['s6_penalty'] = st.number_input("S6 Penalty", value=st.session_state.get('s6p', 2), disabled=not params_ui['s6_on'], key='s6p')
     with s_cols2[2]:
+        params_ui['s6w_on'] = st.toggle('S6-W: 週別 業務負荷平準化', value=st.session_state.get('s6w', False), key='s6w')
+        params_ui['s6wp'] = st.number_input("S6-W Penalty", value=st.session_state.get('s6wp', 3), disabled=not params_ui['s6w_on'], key='s6wp')
+    with s_cols2[3]:
         params_ui['s7_on'] = st.toggle('S7: 連続勤務日数', value=st.session_state.get('s7', True), key='s7')
         params_ui['s7_penalty'] = st.number_input("S7 Penalty", value=st.session_state.get('s7p', 50), disabled=not params_ui['s7_on'], key='s7p')
-    with s_cols2[3]:
-        params_ui['high_flat_penalty'] = st.toggle('平準化ペナルティ強化', value=st.session_state.get('high_flat', False), key='high_flat', help="S6/S6-Wのペナルティを「標準P」ではなく「強化P」で計算します。")
         
     st.markdown("##### S1: 日曜人数目標")
     s_cols3 = st.columns(3)
