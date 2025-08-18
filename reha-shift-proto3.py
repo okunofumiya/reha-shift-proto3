@@ -969,8 +969,8 @@ with st.expander("▼ ルール検証モード（上級者向け）"):
 
         params_ui['s6w_on'] = st.toggle('S6-W: 週別 業務負荷平準化', value=st.session_state.get('s6w', False), key='s6w')
         c_s6w_1, c_s6w_2 = st.columns(2)
-        params_ui['s6w_penalty'] = c_s6w_1.number_input("S6-W 標準P", value=st.session_state.get('s6wp', 3), disabled=not params_ui['s6w_on'], key='s6wp')
-        params_ui['s6w_penalty_heavy'] = c_s6w_2.number_input("S6-W 強化P", value=st.session_state.get('s6wph', 6), disabled=not params_ui['s6w_on'], key='s6wph')
+        params_ui['s6wp'] = c_s6w_1.number_input("S6-W 標準P", value=st.session_state.get('s6wp', 3), disabled=not params_ui['s6w_on'], key='s6wp')
+        params_ui['s6wph'] = c_s6w_2.number_input("S6-W 強化P", value=st.session_state.get('s6wph', 6), disabled=not params_ui['s6w_on'], key='s6wph')
 
     with s_cols2[2]:
         params_ui['s7_on'] = st.toggle('S7: 連続勤務日数', value=st.session_state.get('s7', True), key='s7')
