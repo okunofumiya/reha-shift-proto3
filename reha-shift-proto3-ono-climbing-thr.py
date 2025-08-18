@@ -694,7 +694,7 @@ def solve_shift_model(params):
         initial_score, _ = calculate_final_penalties_and_details(shifts_values, params)
 
         # 3. 山登り法で改善
-        improve_schedule_with_local_search(shifts_values, params)
+        shifts_values = improve_schedule_with_local_search(shifts_values, params)
 
         # 4. 改善後の品質を評価
         final_score, final_details = calculate_final_penalties_and_details(shifts_values, params)
