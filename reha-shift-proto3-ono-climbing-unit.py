@@ -642,32 +642,48 @@ def solve_shift_model(params):
         for s_idx, s in enumerate(staff):
             if s in params['part_time_staff_ids']: continue
             s_reqs = requests_map.get(s, {})
+            all_full_requests = {d for d, r in s_reqs.items() if r in ['×', '有', '特', '夏', '△']}
             all_half_day_requests = {d for d, r in s_reqs.items() if r in ['AM有', 'PM有', 'AM休', 'PM休']}
+
             for w_idx, week in enumerate(weeks_in_month):
+                if sum(1 for d in week if d in all_full_requests) >= 3: continue
                 num_full_holidays_in_week = sum(1 - shifts[(s, d)] for d in week)
                 num_half_holidays_in_week = sum(shifts[(s, d)] for d in week if d in all_half_day_requests)
                 total_holiday_value = model.NewIntVar(0, 28, f'thv_s{s_idx}_w{w_idx}')
                 model.Add(total_holiday_value == 2 * num_full_holidays_in_week + num_half_holidays_in_week)
+
+                # 月またぎ週の考慮 (第1週のみ)
                 if is_cross_month_week and w_idx == 0:
-                    prev_week_holidays = staff_info[s].get('前月最終週の休日数', 0) * 2
-                    model.Add(total_holiday_value + int(prev_week_holidays) >= 3)
+                    prev_week_holidays = staff_info[s].get('前月最終週の休日数', 0) * 2 # 0.5日を1として扱うため2倍
+                    cross_month_total_value = model.NewIntVar(0, 42, f'cmtv_s{s_idx}')
+                    model.Add(cross_month_total_value == total_holiday_value + int(prev_week_holidays))
+                    # S0ルールを適用
+                    violation = model.NewBoolVar(f'cm_w_v_s{s_idx}'); model.Add(cross_month_total_value < 3).OnlyEnforceIf(violation); model.Add(cross_month_total_value >= 3).OnlyEnforceIf(violation.Not()); penalties.append(params['s0_penalty'] * violation)
+                # 通常の週
                 else:
                     if len(week) == 7 and params['s0_on']:
-                        model.Add(total_holiday_value >= 3)
+                        violation = model.NewBoolVar(f'f_w_v_s{s_idx}_w{w_idx}'); model.Add(total_holiday_value < 3).OnlyEnforceIf(violation); model.Add(total_holiday_value >= 3).OnlyEnforceIf(violation.Not()); penalties.append(params['s0_penalty'] * violation)
                     elif len(week) < 7 and params['s2_on']:
-                        model.Add(total_holiday_value >= 1)
+                        violation = model.NewBoolVar(f'p_w_v_s{s_idx}_w{w_idx}'); model.Add(total_holiday_value < 1).OnlyEnforceIf(violation); model.Add(total_holiday_value >= 1).OnlyEnforceIf(violation.Not()); penalties.append(params['s2_penalty'] * violation)
 
     if params['s5_on']:
         for d in days:
-            model.Add(sum(shifts[(s, d)] for s in kaifukuki_pt) >= 1)
-            model.Add(sum(shifts[(s, d)] for s in kaifukuki_ot) >= 1)
+            kaifukuki_pt_on = sum(shifts[(s, d)] for s in kaifukuki_pt); kaifukuki_ot_on = sum(shifts[(s, d)] for s in kaifukuki_ot)
+            model.Add(kaifukuki_pt_on + kaifukuki_ot_on >= 1)
+            pt_present = model.NewBoolVar(f'k_p_p_{d}'); ot_present = model.NewBoolVar(f'k_o_p_{d}'); model.Add(kaifukuki_pt_on >= 1).OnlyEnforceIf(pt_present); model.Add(kaifukuki_pt_on == 0).OnlyEnforceIf(pt_present.Not()); model.Add(kaifukuki_ot_on >= 1).OnlyEnforceIf(ot_present); model.Add(kaifukuki_ot_on == 0).OnlyEnforceIf(ot_present.Not()); penalties.append(params['s5_penalty'] * (1 - pt_present)); penalties.append(params['s5_penalty'] * (1 - ot_present))
 
     if params.get('s7_on', False):
         max_consecutive_days = 5
         for s in staff:
             if s in params['part_time_staff_ids']: continue
             for d in range(1, num_days - max_consecutive_days + 1):
-                model.Add(sum(shifts[(s, d + i)] for i in range(max_consecutive_days + 1)) <= max_consecutive_days)
+                # 6日間 (max_consecutive_days + 1) の勤務変数を取得
+                consecutive_shifts = [shifts[(s, d + i)] for i in range(max_consecutive_days + 1)]
+                # 6日連続で勤務した場合にペナルティを課す
+                is_over = model.NewBoolVar(f's7_over_{s}_{d}')
+                model.Add(sum(consecutive_shifts) == max_consecutive_days + 1).OnlyEnforceIf(is_over)
+                model.Add(sum(consecutive_shifts) < max_consecutive_days + 1).OnlyEnforceIf(is_over.Not())
+                penalties.append(params['s7_penalty'] * is_over)
     # (略) ... その他の制約定義 ...
     if any([params['s1a_on'], params['s1b_on'], params['s1c_on']]):
         special_days_map = {'sun': sundays}
@@ -684,6 +700,9 @@ def solve_shift_model(params):
                     ot_diff = model.NewIntVar(-30, 30, f'o_d_{day_type}_{d}'); model.Add(ot_diff == ot_on_day - target_ot); ot_penalty = model.NewIntVar(0, 30, f'o_p_{day_type}_{d}'); model.Add(ot_penalty >= ot_diff - params['tolerance']); model.Add(ot_penalty >= -ot_diff - params['tolerance']); penalties.append(params['s1b_penalty'] * ot_penalty)
                 if params['s1c_on']:
                     st_diff = model.NewIntVar(-10, 10, f's_d_{day_type}_{d}'); model.Add(st_diff == st_on_day - target_st); abs_st_diff = model.NewIntVar(0, 10, f'a_s_d_{day_type}_{d}'); model.AddAbsEquality(abs_st_diff, st_diff); penalties.append(params['s1c_penalty'] * abs_st_diff)
+    if params['s3_on']:
+        for d in days:
+            num_gairai_off = sum(1 - shifts[(s, d)] for s in gairai_staff); penalty = model.NewIntVar(0, len(gairai_staff), f'g_p_{d}'); model.Add(penalty >= num_gairai_off - 1); penalties.append(params['s3_penalty'] * penalty)
     if params['s6_on']:
         unit_penalty_weight = params.get('s6_penalty_heavy', 4) if params.get('high_flat_penalty') else params.get('s6_penalty', 2)
         event_units = params['event_units']

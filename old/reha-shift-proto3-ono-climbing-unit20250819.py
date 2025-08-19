@@ -206,14 +206,33 @@ def _create_schedule_df(shifts_values, staff, days, staff_df, requests_map, year
 
 # --- 第3部: 山登り法とヘルパー関数 ---
 def calculate_internal_penalty_score(shifts_values, params):
-    """山登り法が改善方向を判断するための軽量な評価スコアを計算する"""
+    """【単位数ベース】山登り法が改善方向を判断するための軽量な評価スコア（残余単位数の標準偏差）を計算する"""
     total_std_dev = 0
+    staff_info = params['staff_info']; unit_multiplier_map = params['unit_multiplier_map']
+    event_units = params['event_units']; ratios = params.get('ratios', {})
+
     for job in ['PT', 'OT', 'ST']:
         members = params['job_types'].get(job, [])
         if not members: continue
-        daily_counts = [sum(shifts_values.get((s, d), 0) for s in members) for d in params['weekdays']]
-        if daily_counts:
-            total_std_dev += np.std(daily_counts)
+        
+        daily_residual_units = []
+        for d in params['weekdays']:
+            # その日の提供単位数を計算
+            provided_units = sum(
+                shifts_values.get((s, d), 0) * 
+                int(staff_info[s]['1日の単位数']) * 
+                unit_multiplier_map.get(s, {}).get(d, 1.0) 
+                for s in members
+            )
+            # その日の特別業務単位数を計算
+            event_unit_for_day = event_units[job.lower()].get(d, 0) + (event_units['all'].get(d, 0) * ratios.get(job, 0))
+            # 残余単位数を計算
+            residual_units = provided_units - event_unit_for_day
+            daily_residual_units.append(residual_units)
+
+        if daily_residual_units:
+            total_std_dev += np.std(daily_residual_units)
+            
     return total_std_dev
 
 def is_move_valid(temp_shifts_values, staff_id, max_day, min_day, params):
@@ -267,9 +286,12 @@ def is_move_valid(temp_shifts_values, staff_id, max_day, min_day, params):
     return True
 
 def improve_schedule_with_local_search(shifts_values, params):
-    """【週単位改善版】山登り法で平日均等化改善を行う"""
+    """【単位数ベース・週単位改善版】山登り法で平日業務負荷（残余単位数）の均等化改善を行う"""
     debug_container = st.expander("山登り法 改善プロセス")
     log_messages = []
+    
+    staff_info = params['staff_info']; unit_multiplier_map = params['unit_multiplier_map']
+    event_units = params['event_units']; ratios = params.get('ratios', {})
 
     max_iterations = 100 # 無限ループ防止
     for i in range(max_iterations):
@@ -286,13 +308,25 @@ def improve_schedule_with_local_search(shifts_values, params):
                 members = params['job_types'].get(job, [])
                 if not members: continue
 
-                daily_counts = {d: sum(shifts_values.get((s, d), 0) for s in members) for d in week_weekdays}
-                if not daily_counts: continue
+                # --- 日ごとの残余単位数を計算 ---
+                daily_residual_units = {}
+                for d in week_weekdays:
+                    provided_units = sum(
+                        shifts_values.get((s, d), 0) * 
+                        int(staff_info[s]['1日の単位数']) * 
+                        unit_multiplier_map.get(s, {}).get(d, 1.0) 
+                        for s in members
+                    )
+                    event_unit_for_day = event_units[job.lower()].get(d, 0) + (event_units['all'].get(d, 0) * ratios.get(job, 0))
+                    daily_residual_units[d] = provided_units - event_unit_for_day
+                
+                if not daily_residual_units: continue
 
-                max_day = max(daily_counts, key=daily_counts.get)
-                min_day = min(daily_counts, key=daily_counts.get)
+                max_day = max(daily_residual_units, key=daily_residual_units.get)
+                min_day = min(daily_residual_units, key=daily_residual_units.get)
 
-                if daily_counts[max_day] <= daily_counts[min_day] + 1:
+                # 改善の余地がなければ次へ
+                if daily_residual_units[max_day] <= daily_residual_units[min_day]:
                     continue
                 
                 # 改善候補の職員を探す
@@ -317,7 +351,7 @@ def improve_schedule_with_local_search(shifts_values, params):
                         if new_score + move_cost < current_best_score:
                             staff_name = params['staff_info'][staff_id]['職員名']
                             move_type = "△希望" if request_on_min == '△' else "休日"
-                            log_messages.append(f"✅ [改善 {len(log_messages)+1}] **{staff_name}**: {move_type} `{min_day}日` → `{max_day}日` (スコア: {current_best_score:.4f} → {new_score:.4f})")
+                            log_messages.append(f"✅ [改善 {len(log_messages)+1}] **{staff_name}**: {move_type}を `{min_day}日` から `{max_day}日` へ移動 (スコア: {current_best_score:.4f} → {new_score:.4f})")
                             shifts_values.update(temp_shifts)
                             improvement_found_in_pass = True
                             break # 職員ループ
@@ -608,48 +642,32 @@ def solve_shift_model(params):
         for s_idx, s in enumerate(staff):
             if s in params['part_time_staff_ids']: continue
             s_reqs = requests_map.get(s, {})
-            all_full_requests = {d for d, r in s_reqs.items() if r in ['×', '有', '特', '夏', '△']}
             all_half_day_requests = {d for d, r in s_reqs.items() if r in ['AM有', 'PM有', 'AM休', 'PM休']}
-
             for w_idx, week in enumerate(weeks_in_month):
-                if sum(1 for d in week if d in all_full_requests) >= 3: continue
                 num_full_holidays_in_week = sum(1 - shifts[(s, d)] for d in week)
                 num_half_holidays_in_week = sum(shifts[(s, d)] for d in week if d in all_half_day_requests)
                 total_holiday_value = model.NewIntVar(0, 28, f'thv_s{s_idx}_w{w_idx}')
                 model.Add(total_holiday_value == 2 * num_full_holidays_in_week + num_half_holidays_in_week)
-
-                # 月またぎ週の考慮 (第1週のみ)
                 if is_cross_month_week and w_idx == 0:
-                    prev_week_holidays = staff_info[s].get('前月最終週の休日数', 0) * 2 # 0.5日を1として扱うため2倍
-                    cross_month_total_value = model.NewIntVar(0, 42, f'cmtv_s{s_idx}')
-                    model.Add(cross_month_total_value == total_holiday_value + int(prev_week_holidays))
-                    # S0ルールを適用
-                    violation = model.NewBoolVar(f'cm_w_v_s{s_idx}'); model.Add(cross_month_total_value < 3).OnlyEnforceIf(violation); model.Add(cross_month_total_value >= 3).OnlyEnforceIf(violation.Not()); penalties.append(params['s0_penalty'] * violation)
-                # 通常の週
+                    prev_week_holidays = staff_info[s].get('前月最終週の休日数', 0) * 2
+                    model.Add(total_holiday_value + int(prev_week_holidays) >= 3)
                 else:
                     if len(week) == 7 and params['s0_on']:
-                        violation = model.NewBoolVar(f'f_w_v_s{s_idx}_w{w_idx}'); model.Add(total_holiday_value < 3).OnlyEnforceIf(violation); model.Add(total_holiday_value >= 3).OnlyEnforceIf(violation.Not()); penalties.append(params['s0_penalty'] * violation)
+                        model.Add(total_holiday_value >= 3)
                     elif len(week) < 7 and params['s2_on']:
-                        violation = model.NewBoolVar(f'p_w_v_s{s_idx}_w{w_idx}'); model.Add(total_holiday_value < 1).OnlyEnforceIf(violation); model.Add(total_holiday_value >= 1).OnlyEnforceIf(violation.Not()); penalties.append(params['s2_penalty'] * violation)
+                        model.Add(total_holiday_value >= 1)
 
     if params['s5_on']:
         for d in days:
-            kaifukuki_pt_on = sum(shifts[(s, d)] for s in kaifukuki_pt); kaifukuki_ot_on = sum(shifts[(s, d)] for s in kaifukuki_ot)
-            model.Add(kaifukuki_pt_on + kaifukuki_ot_on >= 1)
-            pt_present = model.NewBoolVar(f'k_p_p_{d}'); ot_present = model.NewBoolVar(f'k_o_p_{d}'); model.Add(kaifukuki_pt_on >= 1).OnlyEnforceIf(pt_present); model.Add(kaifukuki_pt_on == 0).OnlyEnforceIf(pt_present.Not()); model.Add(kaifukuki_ot_on >= 1).OnlyEnforceIf(ot_present); model.Add(kaifukuki_ot_on == 0).OnlyEnforceIf(ot_present.Not()); penalties.append(params['s5_penalty'] * (1 - pt_present)); penalties.append(params['s5_penalty'] * (1 - ot_present))
+            model.Add(sum(shifts[(s, d)] for s in kaifukuki_pt) >= 1)
+            model.Add(sum(shifts[(s, d)] for s in kaifukuki_ot) >= 1)
 
     if params.get('s7_on', False):
         max_consecutive_days = 5
         for s in staff:
             if s in params['part_time_staff_ids']: continue
             for d in range(1, num_days - max_consecutive_days + 1):
-                # 6日間 (max_consecutive_days + 1) の勤務変数を取得
-                consecutive_shifts = [shifts[(s, d + i)] for i in range(max_consecutive_days + 1)]
-                # 6日連続で勤務した場合にペナルティを課す
-                is_over = model.NewBoolVar(f's7_over_{s}_{d}')
-                model.Add(sum(consecutive_shifts) == max_consecutive_days + 1).OnlyEnforceIf(is_over)
-                model.Add(sum(consecutive_shifts) < max_consecutive_days + 1).OnlyEnforceIf(is_over.Not())
-                penalties.append(params['s7_penalty'] * is_over)
+                model.Add(sum(shifts[(s, d + i)] for i in range(max_consecutive_days + 1)) <= max_consecutive_days)
     # (略) ... その他の制約定義 ...
     if any([params['s1a_on'], params['s1b_on'], params['s1c_on']]):
         special_days_map = {'sun': sundays}
@@ -666,9 +684,6 @@ def solve_shift_model(params):
                     ot_diff = model.NewIntVar(-30, 30, f'o_d_{day_type}_{d}'); model.Add(ot_diff == ot_on_day - target_ot); ot_penalty = model.NewIntVar(0, 30, f'o_p_{day_type}_{d}'); model.Add(ot_penalty >= ot_diff - params['tolerance']); model.Add(ot_penalty >= -ot_diff - params['tolerance']); penalties.append(params['s1b_penalty'] * ot_penalty)
                 if params['s1c_on']:
                     st_diff = model.NewIntVar(-10, 10, f's_d_{day_type}_{d}'); model.Add(st_diff == st_on_day - target_st); abs_st_diff = model.NewIntVar(0, 10, f'a_s_d_{day_type}_{d}'); model.AddAbsEquality(abs_st_diff, st_diff); penalties.append(params['s1c_penalty'] * abs_st_diff)
-    if params['s3_on']:
-        for d in days:
-            num_gairai_off = sum(1 - shifts[(s, d)] for s in gairai_staff); penalty = model.NewIntVar(0, len(gairai_staff), f'g_p_{d}'); model.Add(penalty >= num_gairai_off - 1); penalties.append(params['s3_penalty'] * penalty)
     if params['s6_on']:
         unit_penalty_weight = params.get('s6_penalty_heavy', 4) if params.get('high_flat_penalty') else params.get('s6_penalty', 2)
         event_units = params['event_units']
@@ -713,13 +728,26 @@ def solve_shift_model(params):
         # 2. 改善前の品質を評価
         initial_score, _ = calculate_final_penalties_and_details(shifts_values, params)
 
-        # 3. 山登り法で改善
+        # 3. 山登り法のための追加パラメータ計算
+        total_weekday_units_by_job = {}
+        for job, members in job_types.items():
+            if not members or not weekdays:
+                total_weekday_units_by_job[job] = 0
+                continue
+            total_units = sum(int(staff_info[s]['1日の単位数']) * (1 - sum(1 for d in weekdays if requests_map.get(s, {}).get(d) in ['有','特','夏','×','△']) / len(weekdays)) for s in members)
+            total_weekday_units_by_job[job] = total_units
+        
+        total_all_jobs_units = sum(total_weekday_units_by_job.values())
+        ratios = {job: total_units / total_all_jobs_units if total_all_jobs_units > 0 else 0 for job, total_units in total_weekday_units_by_job.items()}
+        params['ratios'] = ratios
+
+        # 4. 山登り法で改善
         shifts_values = improve_schedule_with_local_search(shifts_values, params)
 
-        # 4. 改善後の品質を評価
+        # 5. 改善後の品質を評価
         final_score, final_details = calculate_final_penalties_and_details(shifts_values, params)
         
-        # 5. メッセージ作成と結果返却
+        # 6. メッセージ作成と結果返却
         message = f"求解ステータス: **{solver.StatusName(status)}** | 改善前スコア: **{round(initial_score)}** → 最終スコア: **{round(final_score)}** (改善量: **{round(initial_score - final_score)}**)"
         
         schedule_df = _create_schedule_df(shifts_values, staff, days, params['staff_df'], requests_map, year, month)
