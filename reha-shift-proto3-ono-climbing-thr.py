@@ -341,7 +341,7 @@ def improve_schedule_with_local_search(shifts_values, params):
 
 # --- 第2部: ペナルティ計算関数 ---
 def calculate_final_penalties_and_details(shifts_values, params):
-    """完成した勤務表からペナルティスコアと詳細を計算する（S1, S6を含む完全版）"""
+    """完成した勤務表からペナルティスコアと詳細を計算する（notclimbing版のロジックを統合）"""
     total_penalty = 0
     penalty_details = []
     
@@ -349,8 +349,9 @@ def calculate_final_penalties_and_details(shifts_values, params):
     staff = params['staff']; days = params['days']; num_days = len(days)
     weekdays = params['weekdays']; sundays = params['sundays']; special_saturdays = params['special_saturdays']
     job_types = params['job_types']; unit_multiplier_map = params['unit_multiplier_map']
+    weeks_in_month = params['weeks_in_month']; is_cross_month_week = params['is_cross_month_week']
+    gairai_staff = params['gairai_staff']; kaifukuki_pt = params['kaifukuki_pt']; kaifukuki_ot = params['kaifukuki_ot']
     
-    # Hルール群 (基本的な制約)
     # H1: 月間休日数
     if params['h1_on']:
         for s in staff:
@@ -368,22 +369,29 @@ def calculate_final_penalties_and_details(shifts_values, params):
                 total_penalty += penalty
                 penalty_details.append({'rule': 'H1: 月間休日数', 'staff': staff_info[s]['職員名'], 'day': '-', 'detail': f"休日が{total_holiday_value / 2}日分（目標9日）。ペナルティ:{penalty}"})
 
-    # H2, H3, H5, S4, S5, S7... (他の基本ルールは変更なし)
+    # H2: 希望休違反
     if params['h2_on']:
         for s, reqs in requests_map.items():
             for d, req_type in reqs.items():
                 is_working = shifts_values.get((s, d), 0) == 1
                 if req_type in ['×', '有', '特', '夏'] and is_working:
-                    total_penalty += params['h2_penalty']
-                    penalty_details.append({'rule': 'H2: 希望休違反', 'staff': staff_info[s]['職員名'], 'day': d, 'detail': f"{d}日の「{req_type}」希望に反して出勤。"})
+                    penalty = params['h2_penalty']
+                    total_penalty += penalty
+                    penalty_details.append({'rule': 'H2: 希望休違反', 'staff': staff_info[s]['職員名'], 'day': d, 'detail': f"{d}日の「{req_type}」希望に反して出勤。ペナルティ:{penalty}"})
                 elif req_type in ['○', 'AM有', 'PM有', 'AM休', 'PM休', '出張', '前2h有', '後2h有'] and not is_working:
-                    total_penalty += params['h2_penalty']
-                    penalty_details.append({'rule': 'H2: 希望休違反', 'staff': staff_info[s]['職員名'], 'day': d, 'detail': f"{d}日の「{req_type}」希望に反して休み。"})
+                    penalty = params['h2_penalty']
+                    total_penalty += penalty
+                    penalty_details.append({'rule': 'H2: 希望休違反', 'staff': staff_info[s]['職員名'], 'day': d, 'detail': f"{d}日の「{req_type}」希望に反して休み。ペナルティ:{penalty}"})
+
+    # H3: 役職者未配置
     if params['h3_on']:
         for d in days:
             if sum(shifts_values.get((s, d), 0) for s in params['managers']) == 0:
-                total_penalty += params['h3_penalty']
-                penalty_details.append({'rule': 'H3: 役職者未配置', 'staff': '-', 'day': d, 'detail': f"{d}日に役職者不在。"})
+                penalty = params['h3_penalty']
+                total_penalty += penalty
+                penalty_details.append({'rule': 'H3: 役職者未配置', 'staff': '-', 'day': d, 'detail': f"{d}日に役職者不在。ペナルティ:{penalty}"})
+
+    # H5: 土日出勤回数
     if params.get('h5_on', False):
         for s in staff:
             if s in params['part_time_staff_ids']: continue
@@ -392,15 +400,43 @@ def calculate_final_penalties_and_details(shifts_values, params):
             num_sun_sat_worked = sum(shifts_values.get((s, d), 0) for d in sundays + special_saturdays)
             if pd.notna(sun_sat_limit) and num_sun_sat_worked > sun_sat_limit:
                 over = num_sun_sat_worked - sun_sat_limit
-                total_penalty += params['h5_penalty'] * over
-                penalty_details.append({'rule': 'H5: 土日出勤上限超', 'staff': staff_info[s]['職員名'], 'day': '-', 'detail': f"土日合計出勤が{num_sun_sat_worked}回で上限({sun_sat_limit})超。"})
+                penalty = params['h5_penalty'] * over
+                total_penalty += penalty
+                penalty_details.append({'rule': 'H5: 土日出勤上限超', 'staff': staff_info[s]['職員名'], 'day': '-', 'detail': f"土日合計出勤が{num_sun_sat_worked}回で上限({sun_sat_limit})超。ペナルティ:{penalty}"})
             if pd.notna(sun_sat_lower_limit) and num_sun_sat_worked < sun_sat_lower_limit:
                 under = sun_sat_lower_limit - num_sun_sat_worked
-                total_penalty += params['h5_penalty'] * under
-                penalty_details.append({'rule': 'H5: 土日出勤下限未達', 'staff': staff_info[s]['職員名'], 'day': '-', 'detail': f"土日合計出勤が{num_sun_sat_worked}回で下限({sun_sat_lower_limit})未達。"})
+                penalty = params['h5_penalty'] * under
+                total_penalty += penalty
+                penalty_details.append({'rule': 'H5: 土日出勤下限未達', 'staff': staff_info[s]['職員名'], 'day': '-', 'detail': f"土日合計出勤が{num_sun_sat_worked}回で下限({sun_sat_lower_limit})未達。ペナルティ:{penalty}"})
 
-    # Sルール群 (ソフト制約)
-    # S1: 週末人数目標 (完全実装)
+    # S0/S2: 週休確保 (notclimbing版ロジック)
+    if params['s0_on'] or params['s2_on']:
+        for s in staff:
+            if s in params['part_time_staff_ids']: continue
+            s_reqs = requests_map.get(s, {})
+            all_half_day_requests_staff = {d for d, r in s_reqs.items() if r in ['AM有', 'PM有', 'AM休', 'PM休']}
+            for w_idx, week in enumerate(weeks_in_month):
+                num_full_holidays_in_week = sum(1 - shifts_values.get((s, d), 0) for d in week)
+                num_half_holidays_in_week = sum(1 for d in week if d in all_half_day_requests_staff and shifts_values.get((s,d),0) == 1)
+                total_holiday_value = 2 * num_full_holidays_in_week + num_half_holidays_in_week
+                week_str = f"{week[0]}日～{week[-1]}日"
+                if is_cross_month_week and w_idx == 0:
+                    prev_week_holidays = staff_info[s].get('前月最終週の休日数', 0) * 2
+                    if total_holiday_value + prev_week_holidays < 3:
+                        penalty = params['s0_penalty']
+                        total_penalty += penalty
+                        penalty_details.append({'rule': 'S0: 週休未確保', 'staff': staff_info[s]['職員名'], 'day': week_str, 'detail': f"月またぎ週の休日不足。ペナルティ:{penalty}"})
+                else:
+                    if len(week) == 7 and params['s0_on'] and total_holiday_value < 3:
+                        penalty = params['s0_penalty']
+                        total_penalty += penalty
+                        penalty_details.append({'rule': 'S0: 週休未確保', 'staff': staff_info[s]['職員名'], 'day': week_str, 'detail': f"完全週の休日不足。ペナルティ:{penalty}"})
+                    elif len(week) < 7 and params['s2_on'] and total_holiday_value < 1:
+                        penalty = params['s2_penalty']
+                        total_penalty += penalty
+                        penalty_details.append({'rule': 'S2: 週休未確保', 'staff': staff_info[s]['職員名'], 'day': week_str, 'detail': f"不完全週の休日不足。ペナルティ:{penalty}"})
+
+    # S1: 週末人数目標
     if any([params['s1a_on'], params['s1b_on'], params['s1c_on']]):
         special_days_map = {'sun': sundays}
         if special_saturdays: special_days_map['sat'] = special_saturdays
@@ -412,29 +448,67 @@ def calculate_final_penalties_and_details(shifts_values, params):
                 st_on_day = sum(shifts_values.get((s, d), 0) for s in job_types['ST'])
                 if params['s1a_on']:
                     total_diff = abs((pt_on_day + ot_on_day) - (target_pt + target_ot))
-                    total_penalty += params['s1a_penalty'] * total_diff
+                    if total_diff > 0:
+                        penalty = params['s1a_penalty'] * total_diff
+                        total_penalty += penalty
                 if params['s1b_on']:
-                    pt_penalty = max(0, abs(pt_on_day - target_pt) - params['tolerance'])
-                    ot_penalty = max(0, abs(ot_on_day - target_ot) - params['tolerance'])
-                    total_penalty += params['s1b_penalty'] * (pt_penalty + ot_penalty)
+                    pt_penalty_val = max(0, abs(pt_on_day - target_pt) - params['tolerance'])
+                    ot_penalty_val = max(0, abs(ot_on_day - target_ot) - params['tolerance'])
+                    if pt_penalty_val + ot_penalty_val > 0:
+                        penalty = params['s1b_penalty'] * (pt_penalty_val + ot_penalty_val)
+                        total_penalty += penalty
                 if params['s1c_on']:
                     st_diff = abs(st_on_day - target_st)
-                    total_penalty += params['s1c_penalty'] * st_diff
+                    if st_diff > 0:
+                        penalty = params['s1c_penalty'] * st_diff
+                        total_penalty += penalty
 
-    # S6: 業務負荷平準化 (完全実装)
+    # S3: 外来同時休 (notclimbing版ロジック)
+    if params['s3_on']:
+        for d in days:
+            num_gairai_off = sum(1 - shifts_values.get((s, d), 0) for s in gairai_staff)
+            if num_gairai_off > 1:
+                penalty = params['s3_penalty'] * (num_gairai_off - 1)
+                total_penalty += penalty
+                penalty_details.append({'rule': 'S3: 外来同時休', 'staff': '-', 'day': d, 'detail': f"外来担当者が{num_gairai_off}人休み。ペナルティ:{penalty}"})
+
+    # S4: 準希望休(△)尊重
+    if params['s4_on']:
+        for s, reqs in requests_map.items():
+            for d, req_type in reqs.items():
+                if req_type == '△' and shifts_values.get((s, d), 0) == 1:
+                    penalty = params['s4_penalty']
+                    total_penalty += penalty
+                    penalty_details.append({'rule': 'S4: △希望違反', 'staff': staff_info[s]['職員名'], 'day': d, 'detail': f"△希望日に出勤。ペナルティ:{penalty}"})
+
+    # S5: 回復期配置 (notclimbing版ロジック)
+    if params['s5_on']:
+        for d in days:
+            kaifukuki_pt_on = sum(shifts_values.get((s, d), 0) for s in kaifukuki_pt)
+            kaifukuki_ot_on = sum(shifts_values.get((s, d), 0) for s in kaifukuki_ot)
+            if kaifukuki_pt_on + kaifukuki_ot_on < 1:
+                 # これはハード制約なので基本的には発生しないが、念のため
+                 penalty_details.append({'rule': 'H: 回復期不在', 'staff': '-', 'day': d, 'detail': f"回復期担当者が不在です。"})
+            if kaifukuki_pt_on < 1:
+                penalty = params['s5_penalty']
+                total_penalty += penalty
+                penalty_details.append({'rule': 'S5: 回復期PT不在', 'staff': '-', 'day': d, 'detail': f"回復期担当PTが不在。ペナルティ:{penalty}"})
+            if kaifukuki_ot_on < 1:
+                penalty = params['s5_penalty']
+                total_penalty += penalty
+                penalty_details.append({'rule': 'S5: 回復期OT不在', 'staff': '-', 'day': d, 'detail': f"回復期担当OTが不在。ペナルティ:{penalty}"})
+
+    # S6: 業務負荷平準化
     if params['s6_on']:
         unit_penalty_weight = params.get('s6_penalty_heavy', 4) if params.get('high_flat_penalty') else params.get('s6_penalty', 2)
         event_units = params['event_units']
-        
         total_weekday_units_by_job = {}
         for job, members in job_types.items():
             if not members or not weekdays: total_weekday_units_by_job[job] = 0; continue
             total_units = sum(int(staff_info[s]['1日の単位数']) * (1 - sum(1 for d in weekdays if requests_map.get(s, {}).get(d) in ['有','特','夏','×','△']) / len(weekdays)) for s in members)
             total_weekday_units_by_job[job] = total_units
-        
         total_all_jobs_units = sum(total_weekday_units_by_job.values())
         ratios = {job: total_units / total_all_jobs_units if total_all_jobs_units > 0 else 0 for job, total_units in total_weekday_units_by_job.items()}
-        
         avg_residual_units_by_job = {}
         total_event_units_all = sum(event_units['all'].get(d, 0) for d in weekdays)
         for job, members in job_types.items():
@@ -442,7 +516,6 @@ def calculate_final_penalties_and_details(shifts_values, params):
             total_event_units_job = sum(event_units[job.lower()].get(d, 0) for d in weekdays)
             total_event_units_for_job = total_event_units_job + (total_event_units_all * ratios.get(job, 0))
             avg_residual_units_by_job[job] = (total_weekday_units_by_job.get(job, 0) - total_event_units_for_job) / len(weekdays)
-
         for job, members in job_types.items():
             if not members: continue
             avg_residual_units = avg_residual_units_by_job.get(job, 0); ratio = ratios.get(job, 0)
@@ -451,7 +524,19 @@ def calculate_final_penalties_and_details(shifts_values, params):
                 event_unit_for_day = event_units[job.lower()].get(d, 0) + (event_units['all'].get(d, 0) * ratio)
                 residual_units = provided_units - event_unit_for_day
                 diff = abs(residual_units - avg_residual_units)
-                total_penalty += unit_penalty_weight * diff
+                if diff > 0:
+                    total_penalty += unit_penalty_weight * diff
+
+    # S7: 連続勤務日数 (notclimbing版ロジック)
+    if params.get('s7_on', False):
+        max_consecutive_days = 5
+        for s in staff:
+            if s in params['part_time_staff_ids']: continue
+            for d in range(1, num_days - max_consecutive_days + 1):
+                if sum(shifts_values.get((s, d + i), 0) for i in range(max_consecutive_days + 1)) > max_consecutive_days:
+                    penalty = params['s7_penalty']
+                    total_penalty += penalty
+                    penalty_details.append({'rule': 'S7: 連続勤務超過', 'staff': staff_info[s]['職員名'], 'day': f'{d}日～', 'detail': f"{max_consecutive_days+1}日以上の連続勤務。ペナルティ:{penalty}"})
 
     return total_penalty, penalty_details
 
