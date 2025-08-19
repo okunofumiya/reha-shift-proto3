@@ -434,7 +434,7 @@ def calculate_final_penalties_and_details(shifts_values, params):
                     elif len(week) < 7 and params['s2_on'] and total_holiday_value < 1:
                         penalty = params['s2_penalty']
                         total_penalty += penalty
-                        penalty_details.append({'rule': 'S2: 週休未確保', 'staff': staff_info[s]['職員名'], 'day': week_str, 'detail': f"不完全週の休日不足。ペナルティ:{penalty}"})
+                        # S2のペナルティ詳細は表示しない
 
     # S1: 週末人数目標
     if any([params['s1a_on'], params['s1b_on'], params['s1c_on']]):
@@ -467,10 +467,10 @@ def calculate_final_penalties_and_details(shifts_values, params):
     if params['s3_on']:
         for d in days:
             num_gairai_off = sum(1 - shifts_values.get((s, d), 0) for s in gairai_staff)
-            if num_gairai_off > 1:
+            if num_gairai_off > 2: # 3人以上で表示
                 penalty = params['s3_penalty'] * (num_gairai_off - 1)
                 total_penalty += penalty
-                penalty_details.append({'rule': 'S3: 外来同時休', 'staff': '-', 'day': d, 'detail': f"外来担当者が{num_gairai_off}人休み。ペナルティ:{penalty}"})
+                penalty_details.append({'rule': 'S3: 外来同時休', 'staff': '-', 'day': d, 'detail': f"外来担当者が3人以上({num_gairai_off}人)休み。ペナルティ:{penalty}"})
 
     # S4: 準希望休(△)尊重
     if params['s4_on']:
@@ -479,7 +479,7 @@ def calculate_final_penalties_and_details(shifts_values, params):
                 if req_type == '△' and shifts_values.get((s, d), 0) == 1:
                     penalty = params['s4_penalty']
                     total_penalty += penalty
-                    penalty_details.append({'rule': 'S4: △希望違反', 'staff': staff_info[s]['職員名'], 'day': d, 'detail': f"△希望日に出勤。ペナルティ:{penalty}"})
+                    # S4のペナルティ詳細は表示しない
 
     # S5: 回復期配置 (notclimbing版ロジック)
     if params['s5_on']:
