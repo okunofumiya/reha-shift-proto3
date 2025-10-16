@@ -86,7 +86,7 @@ def gather_current_ui_settings():
         'h1', 'h1p', 'h2', 'h2p', 'h3', 'h3p', 'h5', 'h5p',
         'h_weekend_limit_penalty',
         's0', 's0p', 's2', 's2p', 's3', 's3p', 's4', 's4p',
-        's5', 's5p', 's6', 's6p', 's6ph', 'high_flat', 's7', 's7p',
+        's5', 's5p', 's6', 's6p', 's6ph', 'high_flat', 's7', 's7p', 's7_max_days',
         's1a', 's1ap', 's1b', 's1bp', 's1c', 's1cp',
         'tri_penalty_weight' # 第1部で追加したキー
     ]
@@ -257,7 +257,7 @@ def is_move_valid(temp_shifts_values, staff_id, max_day, min_day, params):
             if len(week) < 7 and total_holiday_value < 1: return False
 
     # 連続勤務日数チェック
-    max_consecutive_days = 5
+    max_consecutive_days = params.get('s7_max_days', 5)
     for d in range(1, params['num_days'] + 1):
         # d日目から始まる6日間の勤務をチェック
         if d + max_consecutive_days <= params['num_days']:
@@ -628,7 +628,7 @@ def solve_shift_model(params):
             model.Add(sum(shifts[(s, d)] for s in kaifukuki_ot) >= 1)
 
     if params.get('s7_on', False):
-        max_consecutive_days = 5
+        max_consecutive_days = params.get('s7_max_days', 5)
         for s in staff:
             if s in params['part_time_staff_ids']: continue
             for d in range(1, num_days - max_consecutive_days + 1):
@@ -886,6 +886,7 @@ with st.expander("▼ ルール検証モード（上級者向け）"):
         params_ui['s6_penalty_heavy'] = c_s6_2.number_input("S6 強化P", value=st.session_state.get('s6ph', 4), disabled=not params_ui['s6_on'], key='s6ph')
     with s_cols2[2]:
         params_ui['s7_on'] = st.toggle('S7: 連続勤務日数', value=st.session_state.get('s7', True), key='s7')
+        params_ui['s7_max_days'] = st.number_input("最大連勤日数", min_value=3, max_value=10, value=st.session_state.get('s7_max_days', 5), step=1, disabled=not params_ui['s7_on'], key='s7_max_days')
         params_ui['s7_penalty'] = st.number_input("S7 Penalty", value=st.session_state.get('s7p', 50), disabled=not params_ui['s7_on'], key='s7p')
     with s_cols2[3]:
         params_ui['high_flat_penalty'] = st.toggle('平準化ペナルティ強化', value=st.session_state.get('high_flat', False), key='high_flat', help="S6のペナルティを「標準P」ではなく「強化P」で計算します。")
