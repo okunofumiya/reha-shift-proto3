@@ -236,7 +236,25 @@ def is_move_valid(temp_shifts_values, staff_id, max_day, min_day, params):
             if kaifukuki_ot_on_day < 1: return False
 
     # --- 週休・連勤チェック (対象職員) ---
-    # S0/S2/月またぎ週の休日数チェックはソフト制約化されたため、is_move_valid（ハード制約チェック）からは削除する。
+    s_reqs = params['requests_map'].get(staff_id, {})
+    all_half_day_requests = {d for d, r in s_reqs.items() if r in ['AM有', 'PM有', 'AM休', 'PM休']}
+
+    for week in params['weeks_in_month']:
+        if not (max_day in week or min_day in week): continue
+
+        num_full_holidays = sum(1 - temp_shifts_values.get((staff_id, d), 0) for d in week)
+        num_half_holidays = sum(1 for d in week if d in all_half_day_requests and temp_shifts_values.get((staff_id, d), 0) == 1)
+        total_holiday_value = 2 * num_full_holidays + num_half_holidays
+
+        # 月またぎ週の考慮
+        is_cross_month_week = params.get('is_cross_month_week', False)
+        if is_cross_month_week and week == params['weeks_in_month'][0]:
+            prev_week_holidays = staff_info[staff_id].get('前月最終週の休日数', 0) * 2
+            total_holiday_value += int(prev_week_holidays)
+            if total_holiday_value < 3: return False
+        else:
+            if len(week) == 7 and total_holiday_value < 3: return False
+            if len(week) < 7 and total_holiday_value < 1: return False
 
     # 連続勤務日数チェック
     max_consecutive_days = params.get('s7_max_days', 5)
@@ -380,50 +398,7 @@ def calculate_final_penalties_and_details(shifts_values, params):
                 total_penalty += params['h5_penalty'] * under
                 penalty_details.append({'rule': 'H5: 土日出勤下限未達', 'staff': staff_info[s]['職員名'], 'day': '-', 'detail': f"土日合計出勤が{num_sun_sat_worked}回で下限({sun_sat_lower_limit})未達。"})
 
-    # S0/S2: 週休確保
-    if params['s0_on'] or params['s2_on']:
-        weeks_in_month = params['weeks_in_month']
-        is_cross_month_week = params['is_cross_month_week']
-        for s in staff:
-            if s in params['part_time_staff_ids']: continue
-            s_reqs = requests_map.get(s, {})
-            all_half_day_requests = {d for d, r in s_reqs.items() if r in ['AM有', 'PM有', 'AM休', 'PM休']}
-            
-            for w_idx, week in enumerate(weeks_in_month):
-                num_full_holidays = sum(1 - shifts_values.get((s, d), 0) for d in week)
-                num_half_holidays = sum(1 for d in week if d in all_half_day_requests and shifts_values.get((s, d), 0) == 1)
-                total_holiday_value = 2 * num_full_holidays + num_half_holidays
-                
-                week_str = f"{week[0]}日〜{week[-1]}日"
-
-                # 月またぎ週
-                if is_cross_month_week and w_idx == 0 and params['s0_on']:
-                    prev_week_holidays = staff_info[s].get('前月最終週の休日数', 0) * 2
-                    combined_holiday_value = total_holiday_value + int(prev_week_holidays)
-                    if combined_holiday_value < 3:
-                        under_value = 3 - combined_holiday_value
-                        under_days = under_value / 2
-                        penalty = params['s0_penalty'] * under_value
-                        total_penalty += penalty
-                        penalty_details.append({'rule': 'S0: 月またぎ週休', 'staff': staff_info[s]['職員名'], 'day': week_str, 'detail': f"前月と合わせた休日が{combined_holiday_value / 2}日分 (目標1.5日)。不足{under_days}日分。ペナルティ:{penalty}"})
-                # 通常週
-                else:
-                    # S0: 完全週
-                    if len(week) == 7 and params['s0_on']:
-                        if total_holiday_value < 3:
-                            under_value = 3 - total_holiday_value
-                            under_days = under_value / 2
-                            penalty = params['s0_penalty'] * under_value
-                            total_penalty += penalty
-                            penalty_details.append({'rule': 'S0: 完全週の週休', 'staff': staff_info[s]['職員名'], 'day': week_str, 'detail': f"休日が{total_holiday_value / 2}日分 (目標1.5日)。不足{under_days}日分。ペナルティ:{penalty}"})
-                    # S2: 不完全週
-                    elif len(week) < 7 and params['s2_on']:
-                        if total_holiday_value < 1:
-                            under_days = (1 - total_holiday_value) / 2
-                            penalty = params['s2_penalty']
-                            total_penalty += penalty
-                            penalty_details.append({'rule': 'S2: 不完全週の週休', 'staff': staff_info[s]['職員名'], 'day': week_str, 'detail': f"休日が{total_holiday_value / 2}日分 (目標0.5日)。不足{under_days}日分。ペナルティ:{penalty}"})
-
+    # Sルール群 (ソフト制約)
     # S1: 週末人数目標 (完全実装)
     if any([params['s1a_on'], params['s1b_on'], params['s1c_on']]):
         special_days_map = {'sun': sundays}
@@ -638,30 +613,14 @@ def solve_shift_model(params):
                 num_half_holidays_in_week = sum(shifts[(s, d)] for d in week if d in all_half_day_requests)
                 total_holiday_value = model.NewIntVar(0, 28, f'thv_s{s_idx}_w{w_idx}')
                 model.Add(total_holiday_value == 2 * num_full_holidays_in_week + num_half_holidays_in_week)
-
-                # 月またぎ週のルール (S0ペナルティを適用)
-                if is_cross_month_week and w_idx == 0 and params['s0_on']:
+                if is_cross_month_week and w_idx == 0:
                     prev_week_holidays = staff_info[s].get('前月最終週の休日数', 0) * 2
-                    combined_holiday_value = model.NewIntVar(0, 56, f'chv_s{s_idx}_w{w_idx}')
-                    model.Add(combined_holiday_value == total_holiday_value + int(prev_week_holidays))
-                    
-                    under = model.NewIntVar(0, 3, f's0_cross_under_s{s_idx}_w{w_idx}')
-                    model.Add(under >= 3 - combined_holiday_value)
-                    penalties.append(params['s0_penalty'] * under)
-                
-                # 通常週のルール
+                    model.Add(total_holiday_value + int(prev_week_holidays) >= 3)
                 else:
-                    # S0: 完全週の週休1.5日
                     if len(week) == 7 and params['s0_on']:
-                        under = model.NewIntVar(0, 3, f's0_under_s{s_idx}_w{w_idx}')
-                        model.Add(under >= 3 - total_holiday_value)
-                        penalties.append(params['s0_penalty'] * under)
-                    # S2: 不完全週の週休0.5日
+                        model.Add(total_holiday_value >= 3)
                     elif len(week) < 7 and params['s2_on']:
-                        is_violated = model.NewBoolVar(f's2_violated_s{s_idx}_w{w_idx}')
-                        model.Add(total_holiday_value < 1).OnlyEnforceIf(is_violated)
-                        model.Add(total_holiday_value >= 1).OnlyEnforceIf(is_violated.Not())
-                        penalties.append(params['s2_penalty'] * is_violated)
+                        model.Add(total_holiday_value >= 1)
 
     if params['s5_on']:
         for d in days:
